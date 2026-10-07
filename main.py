@@ -146,3 +146,7 @@ async def scan_regal_endpoint(file: UploadFile = File(...)):
 async def health_check():
     """Zeigt an, ob der Server wach ist"""
     return {"status": "online", "info": "Sende dein Bild per POST direkt hierhin!"}
+
+@app.head("/")
+async def head_fallback():
+    return {}
