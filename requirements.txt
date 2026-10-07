@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pillow
+openai
+requests
+playwright
