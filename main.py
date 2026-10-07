@@ -11,6 +11,10 @@ from PIL import Image, ImageDraw, ImageFont
 app = FastAPI(title="Sell4More Live Grid API")
 client = OpenAI() # Zieht sich den Key automatisch aus den Render-Einstellungen
 
+@app.get("/")
+async def startseite_weiterleitung():
+    return {"message": "Der Sell4More-Server ist aktiv! Bitte sende deine Bilder per POST an /scan-regal/"}
+
 # 1. SCHRITT: Fragt vollautomatisch die Preise aus der Sell4More Web-App ab
 async def query_sell4more_web(isbn: str):
     isbn_clean = isbn.replace("-", "").strip()
