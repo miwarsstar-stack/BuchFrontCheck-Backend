@@ -2,6 +2,7 @@ import io
 import base64
 import json
 import asyncio
+import urllib.parse
 import aiohttp
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
@@ -22,23 +23,24 @@ app.add_middleware(
 )
 
 
-# 1. ISBN über Google Books suchen (async, kein Block)
+# 1. ISBN über Google Books suchen (async, parallel)
 async def get_isbn_from_title_async(session: aiohttp.ClientSession, title: str, author: str = "") -> str:
     queries = []
     if author:
-        queries.append(f"intitle:{title}+inauthor:{author}")
+        queries.append(f"intitle:{title} inauthor:{author}")
     queries.append(f"intitle:{title}")
 
     for q in queries:
         try:
-            url = f"https://www.googleapis.com/books/v1/volumes?q={aiohttp.helpers.requote_uri(q)}&maxResults=5&langRestrict=de"
+            encoded = urllib.parse.quote(q)
+            url = f"https://www.googleapis.com/books/v1/volumes?q={encoded}&maxResults=5"
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     for item in data.get("items", []):
                         identifiers = item.get("volumeInfo", {}).get("industryIdentifiers", [])
                         for ident in identifiers:
-                            if ident.get("type") in ("ISBN_13",):
+                            if ident.get("type") == "ISBN_13":
                                 isbn = ident["identifier"]
                                 print(f"ISBN gefunden: {isbn} für '{title}'")
                                 return isbn
@@ -111,6 +113,10 @@ async def query_bonavendi(isbn: str) -> tuple[float, str]:
     except Exception as e:
         print(f"Bonavendi Fehler für {isbn_clean}: {e}")
 
+    return 0.0, "Kein Ankauf"
+
+
+async def kein_ankauf() -> tuple[float, str]:
     return 0.0, "Kein Ankauf"
 
 
@@ -199,7 +205,7 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
     # Alle Bonavendi-Abfragen parallel
     bonavendi_tasks = [
-        query_bonavendi(isbn) if isbn else asyncio.coroutine(lambda: (0.0, "Kein Ankauf"))()
+        query_bonavendi(isbn) if isbn else kein_ankauf()
         for isbn in isbns
     ]
     preise = await asyncio.gather(*bonavendi_tasks, return_exceptions=True)
