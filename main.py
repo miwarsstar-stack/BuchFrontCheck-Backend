@@ -1,7 +1,6 @@
 import io
 import base64
 import json
-import re
 import requests
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
@@ -20,78 +19,99 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Sell4More Preis per HTTP-API (kein Playwright nötig)
-def query_sell4more_api(isbn: str) -> tuple[float, str]:
+# 1. SCHRITT: Ankaufpreise direkt von momox, reBuy und Studibuch
+def query_ankauf_preis(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
-    try:
-        # Sell4More hat eine JSON-API die direkt abgefragt werden kann
-        res = requests.get(
-            "https://www.sell4more.de/api/v1/search",
-            params={"ean": isbn_clean},
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-            timeout=10
-        )
-        if res.status_code == 200:
-            data = res.json()
-            # Bestes Angebot extrahieren
-            offers = data.get("offers") or data.get("results") or data.get("items") or []
-            if offers:
-                best = offers[0]
-                preis = float(best.get("price") or best.get("buyPrice") or best.get("value") or 0)
-                anbieter = best.get("vendor") or best.get("name") or best.get("shop") or "Ankäufer"
-                if preis > 0:
-                    return preis, anbieter
-    except Exception as e:
-        print(f"Sell4More API Fehler: {e}")
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; PriceBot/1.0)"}
+    angebote = []
 
-    # Fallback: rebuy.de API (zuverlässig, keine Auth nötig)
+    # --- momox ---
     try:
         res = requests.get(
-            "https://www.rebuy.de/api/v4/products",
-            params={"ean": isbn_clean, "condition": "very_good"},
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=10
+            f"https://www.momox.de/api/v3/offer/{isbn_clean}",
+            headers=headers,
+            timeout=8
         )
         if res.status_code == 200:
             data = res.json()
-            items = data.get("data") or data.get("items") or data.get("products") or []
-            if items:
-                item = items[0]
-                preis = float(item.get("buyPrice") or item.get("buy_price") or item.get("price") or 0)
-                if preis > 0:
-                    return preis, "rebuy"
+            preis = 0.0
+            for key in ("price", "buyPrice", "purchasePrice", "offer_price", "value"):
+                if data.get(key):
+                    preis = float(data[key])
+                    break
+            if preis > 0:
+                angebote.append((preis, "momox"))
+                print(f"momox: {preis}€ für {isbn_clean}")
     except Exception as e:
-        print(f"Rebuy API Fehler: {e}")
+        print(f"momox Fehler: {e}")
+
+    # --- reBuy ---
+    try:
+        res = requests.get(
+            f"https://www.rebuy.de/api/v4/buyback/price/{isbn_clean}",
+            headers=headers,
+            timeout=8
+        )
+        if res.status_code == 200:
+            data = res.json()
+            preis = 0.0
+            for key in ("price", "buyPrice", "buy_price", "purchasePrice", "value"):
+                if data.get(key):
+                    preis = float(data[key])
+                    break
+            if preis > 0:
+                angebote.append((preis, "reBuy"))
+                print(f"reBuy: {preis}€ für {isbn_clean}")
+    except Exception as e:
+        print(f"reBuy Fehler: {e}")
+
+    # --- Studibuch ---
+    try:
+        res = requests.get(
+            f"https://www.studibuch.de/api/buyback/{isbn_clean}",
+            headers=headers,
+            timeout=8
+        )
+        if res.status_code == 200:
+            data = res.json()
+            preis = 0.0
+            for key in ("price", "buyPrice", "buy_price", "ankaufspreis", "value"):
+                if data.get(key):
+                    preis = float(data[key])
+                    break
+            if preis > 0:
+                angebote.append((preis, "Studibuch"))
+                print(f"Studibuch: {preis}€ für {isbn_clean}")
+    except Exception as e:
+        print(f"Studibuch Fehler: {e}")
+
+    # Bestes Angebot zurückgeben
+    if angebote:
+        bestes = max(angebote, key=lambda x: x[0])
+        return bestes[0], bestes[1]
 
     return 0.0, "Kein Ankauf"
 
-# 2. SCHRITT: ISBN über Open Library suchen
+
+# 2. SCHRITT: Titel normalisieren
 def normalize_title(title: str) -> str:
-    """Titel normalisieren: Großbuchstaben → Title Case, Sonderzeichen behalten"""
-    # Wenn alles Großbuchstaben → in Title Case umwandeln
     if title == title.upper():
         return title.title()
     return title
 
+
+# 3. SCHRITT: ISBN über Open Library suchen
 def get_isbn_from_title(title: str, author: str = "") -> str:
     headers = {"User-Agent": "Sell4MoreScanner/1.0"}
-
     title_norm = normalize_title(title.strip())
     author_norm = normalize_title(author.strip())
 
-    # Alle Query-Varianten die wir versuchen
     search_variants = []
-
     if author_norm:
         search_variants.append({"title": title_norm, "author": author_norm})
     search_variants.append({"title": title_norm})
-    # Originalschreibweise als Fallback
     if title_norm != title.strip():
         search_variants.append({"title": title.strip()})
-    # Nur erste 3 Wörter des Titels versuchen
     short_title = " ".join(title_norm.split()[:3])
     if short_title != title_norm:
         search_variants.append({"title": short_title})
@@ -99,7 +119,7 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
     for params in search_variants:
         try:
             params["limit"] = 5
-            params["fields"] = "isbn,title,author_name,language"
+            params["fields"] = "isbn,title,author_name"
             res = requests.get(
                 "https://openlibrary.org/search.json",
                 params=params,
@@ -109,20 +129,18 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
             if res.status_code == 200:
                 docs = res.json().get("docs", [])
                 for doc in docs:
-                    isbns = doc.get("isbn", [])
-                    # ISBN-13 mit 978/979 bevorzugen
-                    for isbn in isbns:
+                    for isbn in doc.get("isbn", []):
                         if len(isbn) == 13 and isbn.startswith(("978", "979")):
-                            print(f"ISBN gefunden: {isbn} für '{title}' (query: {params})")
+                            print(f"ISBN gefunden: {isbn} für '{title}'")
                             return isbn
         except Exception as e:
             print(f"Open Library Fehler: {e}")
-            continue
 
     print(f"Keine ISBN gefunden für '{title}'")
     return ""
 
-# 3. SCHRITT: Das Bild-Verarbeitungs-Gehirn
+
+# 4. SCHRITT: Bild verarbeiten mit GPT-4o
 def verarbeite_das_bild(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image.thumbnail((1024, 1024), Image.LANCZOS)
@@ -144,16 +162,20 @@ def verarbeite_das_bild(image_bytes):
                         "items": {
                             "type": "object",
                             "properties": {
-                                "titel": {"type": "string"}, "autor": {"type": "string"},
-                                "ymin": {"type": "integer"}, "xmin": {"type": "integer"},
-                                "ymax": {"type": "integer"}, "xmax": {"type": "integer"}
+                                "titel": {"type": "string"},
+                                "autor": {"type": "string"},
+                                "ymin": {"type": "integer"},
+                                "xmin": {"type": "integer"},
+                                "ymax": {"type": "integer"},
+                                "xmax": {"type": "integer"}
                             },
                             "required": ["titel", "autor", "ymin", "xmin", "ymax", "xmax"],
                             "additionalProperties": False
                         }
                     }
                 },
-                "required": ["buecher"], "additionalProperties": False
+                "required": ["buecher"],
+                "additionalProperties": False
             }
         }
     }
@@ -185,7 +207,8 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
 
     return image, daten, draw, font
 
-# 4. SCHRITT: BEIDE ENDPOINTS NEHMEN BILDER AN
+
+# 5. SCHRITT: ENDPOINTS
 
 @app.post("/")
 async def scan_regal_root(file: UploadFile = File(...)):
@@ -194,12 +217,11 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
     for buch in daten["buecher"]:
         isbn = get_isbn_from_title(buch["titel"], buch["autor"])
-        preis, anbieter = query_sell4more_api(isbn) if isbn else (0.0, "Kein Ankauf")
+        preis, anbieter = query_ankauf_preis(isbn) if isbn else (0.0, "Kein Ankauf")
 
         print(f"Buch: {buch['titel']} | ISBN: {isbn or '-'} | Preis: {preis}€ | Anbieter: {anbieter}")
 
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
-
         zeile1 = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "Kein Ankauf"
         zeile2 = f"ISBN: {isbn}" if isbn else "ISBN: -"
 
@@ -221,13 +243,16 @@ async def scan_regal_root(file: UploadFile = File(...)):
     img_byte_arr.seek(0)
     return StreamingResponse(img_byte_arr, media_type="image/jpeg")
 
+
 @app.post("/scan-regal")
 async def scan_regal_endpoint(file: UploadFile = File(...)):
     return await scan_regal_root(file)
 
+
 @app.get("/")
 async def health_check():
     return {"status": "online", "info": "Sende dein Bild per POST direkt hierhin!"}
+
 
 @app.head("/")
 async def head_fallback():
