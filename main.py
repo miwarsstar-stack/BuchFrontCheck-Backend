@@ -47,44 +47,61 @@ async def query_sell4more_web(isbn: str):
         print(f"Fehler bei Sell4More Web-App (ISBN: {isbn_clean}): {e}")
         return 0.0, "Fehler"
 
-# 2. SCHRITT: Titel in ISBN umwandeln (FIX: korrekter Query + Fallback)
+# 2. SCHRITT: ISBN über Open Library suchen (kein API-Key nötig)
 def get_isbn_from_title(title: str, author: str = "") -> str:
-    # Titel normalisieren: Großbuchstaben → Kleinbuchstaben
-    title_clean = title.strip().lower()
-    author_clean = author.strip().lower()
+    headers = {"User-Agent": "Sell4MoreScanner/1.0 (contact@example.com)"}
 
-    # Verschiedene Query-Varianten versuchen
-    queries = [
-        f'intitle:"{title_clean}"',
-        f'intitle:{title_clean}',
-        title_clean,
-    ]
-    if author_clean:
-        queries = [
-            f'intitle:"{title_clean}" inauthor:"{author_clean}"',
-            f'intitle:"{title_clean}"',
-            f'intitle:{title_clean} inauthor:{author_clean}',
-            title_clean,
-        ]
+    # Variante 1: Titel + Autor über Open Library Search
+    try:
+        params = {
+            "title": title.strip(),
+            "limit": 5,
+            "fields": "isbn,title,author_name"
+        }
+        if author.strip():
+            params["author"] = author.strip()
 
-    for query in queries:
+        res = requests.get(
+            "https://openlibrary.org/search.json",
+            params=params,
+            headers=headers,
+            timeout=8
+        )
+        if res.status_code == 200:
+            docs = res.json().get("docs", [])
+            for doc in docs:
+                isbns = doc.get("isbn", [])
+                # ISBN-13 bevorzugen (13 Stellen)
+                for isbn in isbns:
+                    if len(isbn) == 13 and isbn.startswith(("978", "979")):
+                        print(f"ISBN gefunden (Open Library): {isbn} für '{title}'")
+                        return isbn
+                # Fallback: erste ISBN nehmen
+                for isbn in isbns:
+                    if len(isbn) == 13:
+                        print(f"ISBN gefunden (Fallback): {isbn} für '{title}'")
+                        return isbn
+    except Exception as e:
+        print(f"Open Library Fehler für '{title}': {e}")
+
+    # Variante 2: Nur Titel ohne Autor versuchen
+    if author.strip():
         try:
             res = requests.get(
-                "https://www.googleapis.com/books/v1/volumes",
-                params={"q": query, "maxResults": 3, "langRestrict": "de"},
-                timeout=5
+                "https://openlibrary.org/search.json",
+                params={"title": title.strip(), "limit": 3, "fields": "isbn,title"},
+                headers=headers,
+                timeout=8
             )
             if res.status_code == 200:
-                items = res.json().get("items", [])
-                for item in items:
-                    for identifier in item["volumeInfo"].get("industryIdentifiers", []):
-                        if identifier["type"] == "ISBN_13":
-                            isbn = identifier["identifier"]
-                            print(f"ISBN gefunden: {isbn} für '{title}' (query: {query})")
+                docs = res.json().get("docs", [])
+                for doc in docs:
+                    for isbn in doc.get("isbn", []):
+                        if len(isbn) == 13 and isbn.startswith(("978", "979")):
+                            print(f"ISBN gefunden (nur Titel): {isbn} für '{title}'")
                             return isbn
         except Exception as e:
-            print(f"ISBN-Fehler für '{title}': {e}")
-            continue
+            print(f"Open Library Fallback-Fehler für '{title}': {e}")
 
     print(f"Keine ISBN gefunden für '{title}'")
     return ""
@@ -169,13 +186,10 @@ async def scan_regal_root(file: UploadFile = File(...)):
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
 
         # Zeile 1: Preis oder Status
-        if preis > 0.0:
-            zeile1 = f"{anbieter}: {preis:.2f}€"
-        else:
-            zeile1 = "Kein Ankauf"
+        zeile1 = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "Kein Ankauf"
 
-        # Zeile 2: ISBN (immer wenn vorhanden)
-        zeile2 = f"ISBN: {isbn}" if isbn else "ISBN: nicht gefunden"
+        # Zeile 2: ISBN immer anzeigen
+        zeile2 = f"ISBN: {isbn}" if isbn else "ISBN: -"
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
