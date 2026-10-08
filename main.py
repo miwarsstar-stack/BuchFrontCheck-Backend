@@ -3,11 +3,11 @@ import base64
 import json
 import asyncio
 import requests
+import aiohttp
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
-from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
@@ -21,80 +21,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Ankaufpreise über bonavendi.de (funktioniert von Heim-IP)
+
+# 1. SCHRITT: Ankaufpreise direkt per HTTP (kein Playwright)
+async def _query_momox(session: aiohttp.ClientSession, isbn: str) -> tuple[float, str]:
+    try:
+        url = f"https://www.momox.de/api/sell/books/{isbn}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                price = float(data.get("sellPrice") or data.get("price") or 0)
+                if price > 0:
+                    return price, "Momox"
+    except Exception as e:
+        print(f"Momox Fehler {isbn}: {e}")
+    return 0.0, "Momox"
+
+
+async def _query_rebuy(session: aiohttp.ClientSession, isbn: str) -> tuple[float, str]:
+    try:
+        url = f"https://www.rebuy.de/api/v3/buy-orders/calculate?ean={isbn}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                price = float(data.get("price") or data.get("totalPrice") or 0)
+                if price > 0:
+                    return price, "reBuy"
+    except Exception as e:
+        print(f"reBuy Fehler {isbn}: {e}")
+    return 0.0, "reBuy"
+
+
+async def _query_studibuch(session: aiohttp.ClientSession, isbn: str) -> tuple[float, str]:
+    try:
+        url = f"https://www.studibuch.de/api/sell?isbn={isbn}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                price = float(data.get("price") or data.get("buyPrice") or 0)
+                if price > 0:
+                    return price, "Studibuch"
+    except Exception as e:
+        print(f"Studibuch Fehler {isbn}: {e}")
+    return 0.0, "Studibuch"
+
+
 async def query_bonavendi(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
-            )
-            page = await context.new_page()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        "Accept": "application/json",
+    }
 
-            # Netzwerk-Requests abfangen um JSON direkt zu lesen
-            api_data = []
+    async with aiohttp.ClientSession(headers=headers) as session:
+        tasks = [
+            _query_momox(session, isbn_clean),
+            _query_rebuy(session, isbn_clean),
+            _query_studibuch(session, isbn_clean),
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            async def handle_response(response):
-                if "bonavendi" in response.url and response.status == 200:
-                    content_type = response.headers.get("content-type", "")
-                    if "json" in content_type:
-                        try:
-                            body = await response.json()
-                            api_data.append(body)
-                            print(f"Bonavendi API Response: {str(body)[:300]}")
-                        except:
-                            pass
+    bester_preis = 0.0
+    bester_anbieter = "Kein Ankauf"
 
-            page.on("response", handle_response)
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        preis, anbieter = r
+        if preis > bester_preis:
+            bester_preis = preis
+            bester_anbieter = anbieter
 
-            await page.goto(f"https://www.bonavendi.de/verkaufen/?ean={isbn_clean}", timeout=20000)
-            await page.wait_for_timeout(4000)
-
-            # Versuche Preise aus dem DOM zu lesen
-            try:
-                preise = await page.locator("[data-price], .offer-price, .price, .ankaufspreis").all_inner_texts()
-                print(f"Bonavendi DOM Preise: {preise[:5]}")
-            except:
-                preise = []
-
-            # Versuche bestes Angebot zu finden
-            bester_preis = 0.0
-            bester_anbieter = "Kein Ankauf"
-
-            # Aus API-Daten
-            for data in api_data:
-                angebote = []
-                if isinstance(data, list):
-                    angebote = data
-                elif isinstance(data, dict):
-                    for key in ("offers", "results", "data", "items"):
-                        if data.get(key):
-                            angebote = data[key]
-                            break
-
-                for a in angebote:
-                    for price_key in ("price", "buyPrice", "buy_price", "ankaufspreis", "value"):
-                        val = a.get(price_key)
-                        if val:
-                            try:
-                                p_val = float(str(val).replace(",", ".").replace("€", "").strip())
-                                if p_val > bester_preis:
-                                    bester_preis = p_val
-                                    bester_anbieter = a.get("vendor") or a.get("name") or a.get("shop") or "Ankäufer"
-                            except:
-                                pass
-
-            await browser.close()
-
-            if bester_preis > 0:
-                print(f"Bonavendi bestes Angebot: {bester_preis}€ bei {bester_anbieter}")
-                return bester_preis, bester_anbieter
-
-    except Exception as e:
-        print(f"Bonavendi Fehler für {isbn_clean}: {e}")
-
-    return 0.0, "Kein Ankauf"
+    print(f"Bestes Angebot für {isbn_clean}: {bester_preis}€ bei {bester_anbieter}")
+    return bester_preis, bester_anbieter
 
 
 # 2. SCHRITT: Titel normalisieren
