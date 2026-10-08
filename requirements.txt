@@ -3,5 +3,5 @@ uvicorn
 pillow
 openai
 requests
-python-multipart
 aiohttp
+python-multipart
