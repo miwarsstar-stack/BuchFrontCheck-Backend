@@ -1,11 +1,13 @@
 import io
 import base64
 import json
+import asyncio
 import requests
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
@@ -19,84 +21,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Ankaufpreis über buchpreisvergleich.de
-def query_ankauf_preis(isbn: str) -> tuple[float, str]:
+# 1. SCHRITT: Ankaufpreise über bonavendi.de (funktioniert von Heim-IP)
+async def query_bonavendi(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-        "Accept": "application/json, text/html, */*",
-        "Accept-Language": "de-DE,de;q=0.9",
-        "Referer": "https://www.buchpreisvergleich.net/",
-    }
-
-    # --- buchpreisvergleich.net ---
     try:
-        res = requests.get(
-            f"https://www.buchpreisvergleich.net/compare.aspx",
-            params={"isbn": isbn_clean, "format": "json"},
-            headers=headers,
-            timeout=10
-        )
-        print(f"buchpreisvergleich Status: {res.status_code} | {res.text[:300]}")
-        if res.status_code == 200:
-            data = res.json()
-            angebote = data.get("offers") or data.get("results") or []
-            bestes = None
-            bester_preis = 0.0
-            for a in angebote:
-                p = float(a.get("price") or a.get("buyPrice") or 0)
-                if p > bester_preis:
-                    bester_preis = p
-                    bestes = a.get("vendor") or a.get("shop") or "Ankäufer"
-            if bester_preis > 0:
-                return bester_preis, bestes
-    except Exception as e:
-        print(f"buchpreisvergleich Fehler: {e}")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+            )
+            page = await context.new_page()
 
-    # --- ZVAB / AbeBooks Preisabfrage (öffentlich) ---
-    try:
-        res = requests.get(
-            "https://www.abebooks.com/servlet/SearchResults",
-            params={"isbn": isbn_clean, "n": "100121503", "cm_sp": "SearchF-_-NullResults-_-Normal"},
-            headers=headers,
-            timeout=10
-        )
-        print(f"AbeBooks Status: {res.status_code}")
-    except Exception as e:
-        print(f"AbeBooks Fehler: {e}")
+            # Netzwerk-Requests abfangen um JSON direkt zu lesen
+            api_data = []
 
-    # --- bonavendi.de (Ankaufpreisvergleich, hat JSON-API) ---
-    try:
-        res = requests.get(
-            "https://www.bonavendi.de/ankauf/json",
-            params={"ean": isbn_clean},
-            headers={
-                **headers,
-                "Accept": "application/json",
-            },
-            timeout=10
-        )
-        print(f"bonavendi Status: {res.status_code} | {res.text[:300]}")
-        if res.status_code == 200:
-            data = res.json()
-            angebote = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
-            bestes_preis = 0.0
-            bester_name = "Kein Ankauf"
-            for a in angebote:
-                for key in ("price", "buyPrice", "ankaufspreis", "value", "offer"):
-                    val = a.get(key)
-                    if val:
+            async def handle_response(response):
+                if "bonavendi" in response.url and response.status == 200:
+                    content_type = response.headers.get("content-type", "")
+                    if "json" in content_type:
                         try:
-                            p = float(str(val).replace(",", ".").replace("€", "").strip())
-                            if p > bestes_preis:
-                                bestes_preis = p
-                                bester_name = a.get("vendor") or a.get("name") or a.get("shop") or "Ankäufer"
+                            body = await response.json()
+                            api_data.append(body)
+                            print(f"Bonavendi API Response: {str(body)[:300]}")
                         except:
                             pass
-            if bestes_preis > 0:
-                return bestes_preis, bester_name
+
+            page.on("response", handle_response)
+
+            await page.goto(f"https://www.bonavendi.de/verkaufen/?ean={isbn_clean}", timeout=20000)
+            await page.wait_for_timeout(4000)
+
+            # Versuche Preise aus dem DOM zu lesen
+            try:
+                preise = await page.locator("[data-price], .offer-price, .price, .ankaufspreis").all_inner_texts()
+                print(f"Bonavendi DOM Preise: {preise[:5]}")
+            except:
+                preise = []
+
+            # Versuche bestes Angebot zu finden
+            bester_preis = 0.0
+            bester_anbieter = "Kein Ankauf"
+
+            # Aus API-Daten
+            for data in api_data:
+                angebote = []
+                if isinstance(data, list):
+                    angebote = data
+                elif isinstance(data, dict):
+                    for key in ("offers", "results", "data", "items"):
+                        if data.get(key):
+                            angebote = data[key]
+                            break
+
+                for a in angebote:
+                    for price_key in ("price", "buyPrice", "buy_price", "ankaufspreis", "value"):
+                        val = a.get(price_key)
+                        if val:
+                            try:
+                                p_val = float(str(val).replace(",", ".").replace("€", "").strip())
+                                if p_val > bester_preis:
+                                    bester_preis = p_val
+                                    bester_anbieter = a.get("vendor") or a.get("name") or a.get("shop") or "Ankäufer"
+                            except:
+                                pass
+
+            await browser.close()
+
+            if bester_preis > 0:
+                print(f"Bonavendi bestes Angebot: {bester_preis}€ bei {bester_anbieter}")
+                return bester_preis, bester_anbieter
+
     except Exception as e:
-        print(f"bonavendi Fehler: {e}")
+        print(f"Bonavendi Fehler für {isbn_clean}: {e}")
 
     return 0.0, "Kein Ankauf"
 
@@ -225,7 +221,7 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
     for buch in daten["buecher"]:
         isbn = get_isbn_from_title(buch["titel"], buch["autor"])
-        preis, anbieter = query_ankauf_preis(isbn) if isbn else (0.0, "Kein Ankauf")
+        preis, anbieter = await query_bonavendi(isbn) if isbn else (0.0, "Kein Ankauf")
 
         print(f"Buch: {buch['titel']} | ISBN: {isbn or '-'} | Preis: {preis}€ | Anbieter: {anbieter}")
 
