@@ -44,7 +44,7 @@ async def query_sell4more_web(isbn: str):
             price_float = float(price_element.replace("€", "").replace(",", ".").strip())
             return price_float, vendor_element or "Ankäufer"
     except Exception as e:
-        print(f"Fehler bei Sell4More Web-App: {e}")
+        print(f"Fehler bei Sell4More Web-App (ISBN: {isbn_clean}): {e}")
         return 0.0, "Fehler"
 
 # 2. SCHRITT: Titel in ISBN umwandeln
@@ -63,9 +63,12 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
             if items:
                 for identifier in items[0]["volumeInfo"].get("industryIdentifiers", []):
                     if identifier["type"] == "ISBN_13":
-                        return identifier["identifier"]
-    except Exception:
-        pass
+                        isbn = identifier["identifier"]
+                        print(f"ISBN gefunden: {isbn} für '{title}'")
+                        return isbn
+        print(f"Keine ISBN gefunden für '{title}'")
+    except Exception as e:
+        print(f"ISBN-Fehler für '{title}': {e}")
     return ""
 
 # 3. SCHRITT: Das Bild-Verarbeitungs-Gehirn
@@ -124,8 +127,10 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
     daten = json.loads(response.choices[0].message.content)
     print("GPT Antwort:", json.dumps(daten, ensure_ascii=False, indent=2))
     draw = ImageDraw.Draw(image)
-    try: font = ImageFont.load_default(size=24)
-    except: font = ImageFont.load_default()
+    try:
+        font = ImageFont.load_default(size=24)
+    except:
+        font = ImageFont.load_default()
 
     return image, daten, draw, font
 
@@ -141,17 +146,37 @@ async def scan_regal_root(file: UploadFile = File(...)):
         isbn = get_isbn_from_title(buch["titel"], buch["autor"])
         preis, anbieter = await query_sell4more_web(isbn) if isbn else (0.0, "Kein Ankauf")
 
+        print(f"Buch: {buch['titel']} | ISBN: {isbn or 'nicht gefunden'} | Preis: {preis}€ | Anbieter: {anbieter}")
+
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
-        isbn_label = f" | {isbn}" if isbn else ""
-        preis_text = f"{anbieter}: {preis:.2f}€{isbn_label}" if preis > 0.0 else f"0.00€{isbn_label}"
+
+        # ISBN immer anzeigen — auch wenn kein Preis gefunden wurde
+        if isbn:
+            if preis > 0.0:
+                zeile1 = f"{anbieter}: {preis:.2f}€"
+                zeile2 = f"ISBN: {isbn}"
+            else:
+                zeile1 = "Kein Ankauf"
+                zeile2 = f"ISBN: {isbn}"
+        else:
+            zeile1 = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "Kein Ankauf / Keine ISBN"
+            zeile2 = None
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
 
-        text_pos = (buch["xmin"] + 5, buch["ymin"] + 15)
-        text_bbox = draw.textbbox(text_pos, preis_text, font=font)
-        draw.rectangle(text_bbox, fill="black")
-        draw.text(text_pos, preis_text, fill="white", font=font)
+        # Erste Zeile (Preis)
+        text_pos1 = (buch["xmin"] + 5, buch["ymin"] + 5)
+        text_bbox1 = draw.textbbox(text_pos1, zeile1, font=font)
+        draw.rectangle(text_bbox1, fill="black")
+        draw.text(text_pos1, zeile1, fill="white", font=font)
+
+        # Zweite Zeile (ISBN) direkt darunter
+        if zeile2:
+            text_pos2 = (buch["xmin"] + 5, text_bbox1[3] + 4)
+            text_bbox2 = draw.textbbox(text_pos2, zeile2, font=font)
+            draw.rectangle(text_bbox2, fill="black")
+            draw.text(text_pos2, zeile2, fill="white", font=font)
 
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='JPEG')
