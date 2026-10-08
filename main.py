@@ -53,11 +53,11 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
     if author:
         query += f"+inauthor:{author}"
     try:
-        res = requests.get("https://googleapis.com", params={"q": query, "maxResults": 1}, timeout=5)
+        res = requests.get("https://www.googleapis.com/books/v1/volumes", params={"q": query, "maxResults": 1}, timeout=5)
         if res.status_code == 200:
-            items = res.json().get("items",)
+            items = res.json().get("items", [])
             if items:
-                for identifier in items["volumeInfo"].get("industryIdentifiers",):
+               for identifier in items[0]["volumeInfo"].get("industryIdentifiers", []):
                     if identifier["type"] == "ISBN_13":
                         return identifier["identifier"]
     except Exception:
@@ -110,7 +110,7 @@ def verarbeite_das_bild(image_bytes):
         response_format=response_format
     )
     
-    daten = json.loads(response.choices.message.content)
+    daten = json.loads(response.choices[0].message.content)
     draw = ImageDraw.Draw(image)
     try: font = ImageFont.load_default(size=24)
     except: font = ImageFont.load_default()
