@@ -19,71 +19,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Ankaufpreise direkt von momox, reBuy und Studibuch
+# 1. SCHRITT: Ankaufpreise von reBuy (echter Endpunkt) + momox
 def query_ankauf_preis(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; PriceBot/1.0)"}
     angebote = []
 
-    # --- momox ---
+    # --- reBuy (echter Endpunkt) ---
     try:
-        res = requests.get(
-            f"https://www.momox.de/api/v3/offer/{isbn_clean}",
-            headers=headers,
-            timeout=8
+        session = requests.Session()
+        session.get("https://www.rebuy.de/verkaufen", timeout=8)
+        res = session.get(
+            "https://www.rebuy.de/verkaufen/api/product/list-view",
+            params={"page": 1, "query": isbn_clean, "pathname": "/verkaufen/suche"},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "de-DE,de;q=0.9",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-Version": "undefined",
+            },
+            timeout=10
         )
+        print(f"reBuy Status: {res.status_code}")
         if res.status_code == 200:
             data = res.json()
+            product = data.get("identifierProduct")
+            if product and product.get("is_purchaseable"):
+                preis = float(product.get("price_purchase", 0)) / 100
+                name = product.get("name", "reBuy")
+                if preis > 0:
+                    angebote.append((preis, "reBuy"))
+                    print(f"reBuy: {preis}€ für {isbn_clean} ({name})")
+            else:
+                print(f"reBuy: nicht ankaufbar für {isbn_clean}")
+    except Exception as e:
+        print(f"reBuy Fehler: {e}")
+
+    # --- momox (Web-Formular-Endpoint) ---
+    try:
+        session2 = requests.Session()
+        session2.get("https://www.momox.de/", timeout=8)
+        res2 = session2.get(
+            "https://www.momox.de/ajax.php",
+            params={"action": "offer", "ean": isbn_clean},
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=10
+        )
+        print(f"momox Status: {res2.status_code} | Body: {res2.text[:200]}")
+        if res2.status_code == 200:
+            data2 = res2.json()
             preis = 0.0
-            for key in ("price", "buyPrice", "purchasePrice", "offer_price", "value"):
-                if data.get(key):
-                    preis = float(data[key])
-                    break
+            for key in ("price", "offer_price", "buyPrice", "purchase_price", "value"):
+                val = data2.get(key)
+                if val:
+                    try:
+                        preis = float(str(val).replace(",", ".").replace("€", "").strip())
+                        break
+                    except:
+                        pass
             if preis > 0:
                 angebote.append((preis, "momox"))
                 print(f"momox: {preis}€ für {isbn_clean}")
     except Exception as e:
         print(f"momox Fehler: {e}")
-
-    # --- reBuy ---
-    try:
-        res = requests.get(
-            f"https://www.rebuy.de/api/v4/buyback/price/{isbn_clean}",
-            headers=headers,
-            timeout=8
-        )
-        if res.status_code == 200:
-            data = res.json()
-            preis = 0.0
-            for key in ("price", "buyPrice", "buy_price", "purchasePrice", "value"):
-                if data.get(key):
-                    preis = float(data[key])
-                    break
-            if preis > 0:
-                angebote.append((preis, "reBuy"))
-                print(f"reBuy: {preis}€ für {isbn_clean}")
-    except Exception as e:
-        print(f"reBuy Fehler: {e}")
-
-    # --- Studibuch ---
-    try:
-        res = requests.get(
-            f"https://www.studibuch.de/api/buyback/{isbn_clean}",
-            headers=headers,
-            timeout=8
-        )
-        if res.status_code == 200:
-            data = res.json()
-            preis = 0.0
-            for key in ("price", "buyPrice", "buy_price", "ankaufspreis", "value"):
-                if data.get(key):
-                    preis = float(data[key])
-                    break
-            if preis > 0:
-                angebote.append((preis, "Studibuch"))
-                print(f"Studibuch: {preis}€ für {isbn_clean}")
-    except Exception as e:
-        print(f"Studibuch Fehler: {e}")
 
     # Bestes Angebot zurückgeben
     if angebote:
