@@ -3,5 +3,5 @@ uvicorn
 pillow
 openai
 requests
-aiohttp
+playwright
 python-multipart
