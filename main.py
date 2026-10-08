@@ -53,14 +53,12 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
     if author:
         query += f"+inauthor:{author}"
     try:
-        # FIX: Korrekte Google Books API URL
         res = requests.get(
             "https://www.googleapis.com/books/v1/volumes",
             params={"q": query, "maxResults": 1},
             timeout=5
         )
         if res.status_code == 200:
-            # FIX: items ist eine Liste, nicht ein Dict
             items = res.json().get("items", [])
             if items:
                 for identifier in items[0]["volumeInfo"].get("industryIdentifiers", []):
@@ -73,8 +71,6 @@ def get_isbn_from_title(title: str, author: str = "") -> str:
 # 3. SCHRITT: Das Bild-Verarbeitungs-Gehirn
 def verarbeite_das_bild(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-    # FIX: Auf max 1024px skalieren damit GPT-Koordinaten mit dem Bild übereinstimmen
     image.thumbnail((1024, 1024), Image.LANCZOS)
 
     buffered = io.BytesIO()
@@ -115,6 +111,7 @@ Für jedes Buch gib mir:
 - Den Autor (wie auf dem Buchrücken geschrieben)
 - Die exakten Pixelkoordinaten des Buchrückens: xmin, ymin (obere linke Ecke) und xmax, ymax (untere rechte Ecke).
 Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspringe kein Buch."""
+
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": [
@@ -124,7 +121,6 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
         response_format=response_format
     )
 
-    # FIX: choices[0] statt choices
     daten = json.loads(response.choices[0].message.content)
     print("GPT Antwort:", json.dumps(daten, ensure_ascii=False, indent=2))
     draw = ImageDraw.Draw(image)
@@ -147,7 +143,7 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
         isbn_label = f" | {isbn}" if isbn else ""
-preis_text = f"{anbieter}: {preis:.2f}€{isbn_label}" if preis > 0.0 else f"0.00€{isbn_label}"
+        preis_text = f"{anbieter}: {preis:.2f}€{isbn_label}" if preis > 0.0 else f"0.00€{isbn_label}"
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
