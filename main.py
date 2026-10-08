@@ -19,78 +19,84 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Ankaufpreise von reBuy (echter Endpunkt) + momox
+# 1. SCHRITT: Ankaufpreis über buchpreisvergleich.de
 def query_ankauf_preis(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
-    angebote = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        "Accept": "application/json, text/html, */*",
+        "Accept-Language": "de-DE,de;q=0.9",
+        "Referer": "https://www.buchpreisvergleich.net/",
+    }
 
-    # --- reBuy (echter Endpunkt) ---
+    # --- buchpreisvergleich.net ---
     try:
-        session = requests.Session()
-        session.get("https://www.rebuy.de/verkaufen", timeout=8)
-        res = session.get(
-            "https://www.rebuy.de/verkaufen/api/product/list-view",
-            params={"page": 1, "query": isbn_clean, "pathname": "/verkaufen/suche"},
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "de-DE,de;q=0.9",
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
-                "X-Requested-With": "XMLHttpRequest",
-                "X-Version": "undefined",
-            },
+        res = requests.get(
+            f"https://www.buchpreisvergleich.net/compare.aspx",
+            params={"isbn": isbn_clean, "format": "json"},
+            headers=headers,
             timeout=10
         )
-        print(f"reBuy Status: {res.status_code}")
+        print(f"buchpreisvergleich Status: {res.status_code} | {res.text[:300]}")
         if res.status_code == 200:
             data = res.json()
-            product = data.get("identifierProduct")
-            if product and product.get("is_purchaseable"):
-                preis = float(product.get("price_purchase", 0)) / 100
-                name = product.get("name", "reBuy")
-                if preis > 0:
-                    angebote.append((preis, "reBuy"))
-                    print(f"reBuy: {preis}€ für {isbn_clean} ({name})")
-            else:
-                print(f"reBuy: nicht ankaufbar für {isbn_clean}")
+            angebote = data.get("offers") or data.get("results") or []
+            bestes = None
+            bester_preis = 0.0
+            for a in angebote:
+                p = float(a.get("price") or a.get("buyPrice") or 0)
+                if p > bester_preis:
+                    bester_preis = p
+                    bestes = a.get("vendor") or a.get("shop") or "Ankäufer"
+            if bester_preis > 0:
+                return bester_preis, bestes
     except Exception as e:
-        print(f"reBuy Fehler: {e}")
+        print(f"buchpreisvergleich Fehler: {e}")
 
-    # --- momox (Web-Formular-Endpoint) ---
+    # --- ZVAB / AbeBooks Preisabfrage (öffentlich) ---
     try:
-        session2 = requests.Session()
-        session2.get("https://www.momox.de/", timeout=8)
-        res2 = session2.get(
-            "https://www.momox.de/ajax.php",
-            params={"action": "offer", "ean": isbn_clean},
+        res = requests.get(
+            "https://www.abebooks.com/servlet/SearchResults",
+            params={"isbn": isbn_clean, "n": "100121503", "cm_sp": "SearchF-_-NullResults-_-Normal"},
+            headers=headers,
+            timeout=10
+        )
+        print(f"AbeBooks Status: {res.status_code}")
+    except Exception as e:
+        print(f"AbeBooks Fehler: {e}")
+
+    # --- bonavendi.de (Ankaufpreisvergleich, hat JSON-API) ---
+    try:
+        res = requests.get(
+            "https://www.bonavendi.de/ankauf/json",
+            params={"ean": isbn_clean},
             headers={
-                "User-Agent": "Mozilla/5.0",
+                **headers,
                 "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
             },
             timeout=10
         )
-        print(f"momox Status: {res2.status_code} | Body: {res2.text[:200]}")
-        if res2.status_code == 200:
-            data2 = res2.json()
-            preis = 0.0
-            for key in ("price", "offer_price", "buyPrice", "purchase_price", "value"):
-                val = data2.get(key)
-                if val:
-                    try:
-                        preis = float(str(val).replace(",", ".").replace("€", "").strip())
-                        break
-                    except:
-                        pass
-            if preis > 0:
-                angebote.append((preis, "momox"))
-                print(f"momox: {preis}€ für {isbn_clean}")
+        print(f"bonavendi Status: {res.status_code} | {res.text[:300]}")
+        if res.status_code == 200:
+            data = res.json()
+            angebote = data if isinstance(data, list) else data.get("offers") or data.get("data") or []
+            bestes_preis = 0.0
+            bester_name = "Kein Ankauf"
+            for a in angebote:
+                for key in ("price", "buyPrice", "ankaufspreis", "value", "offer"):
+                    val = a.get(key)
+                    if val:
+                        try:
+                            p = float(str(val).replace(",", ".").replace("€", "").strip())
+                            if p > bestes_preis:
+                                bestes_preis = p
+                                bester_name = a.get("vendor") or a.get("name") or a.get("shop") or "Ankäufer"
+                        except:
+                            pass
+            if bestes_preis > 0:
+                return bestes_preis, bester_name
     except Exception as e:
-        print(f"momox Fehler: {e}")
-
-    # Bestes Angebot zurückgeben
-    if angebote:
-        bestes = max(angebote, key=lambda x: x[0])
-        return bestes[0], bestes[1]
+        print(f"bonavendi Fehler: {e}")
 
     return 0.0, "Kein Ankauf"
 
