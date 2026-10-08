@@ -78,7 +78,7 @@ def verarbeite_das_bild(image_bytes):
     image.thumbnail((1024, 1024), Image.LANCZOS)
 
     buffered = io.BytesIO()
-    image.save(buffered, format="JPEG")
+    image.save(buffered, format="JPEG", quality=95)
     base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
     response_format = {
@@ -108,8 +108,13 @@ def verarbeite_das_bild(image_bytes):
         }
     }
 
-    prompt = "Erkenne alle Buchrücken auf dem Bild. Gib mir für jedes Buch den Titel, Autor und die exakten Pixel-Koordinaten an."
-
+    prompt = """Analysiere dieses Foto eines Bücherregals sehr genau.
+Erkenne jeden einzelnen sichtbaren Buchrücken.
+Für jedes Buch gib mir:
+- Den genauen Titel (wie auf dem Buchrücken geschrieben)
+- Den Autor (wie auf dem Buchrücken geschrieben)
+- Die exakten Pixelkoordinaten des Buchrückens: xmin, ymin (obere linke Ecke) und xmax, ymax (untere rechte Ecke).
+Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspringe kein Buch."""
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": [
