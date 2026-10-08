@@ -4,12 +4,21 @@ import json
 import requests
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
 client = OpenAI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Erlaubt FlutLab den Zugriff
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 1. SCHRITT: Playwright-Abfrage für die Sell4More Web-App
 async def query_sell4more_web(isbn: str):
