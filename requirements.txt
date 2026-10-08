@@ -4,4 +4,5 @@ pillow
 openai
 requests
 playwright
+aiohttp
 python-multipart
