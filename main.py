@@ -1,12 +1,12 @@
 import io
 import base64
 import json
+import re
 import requests
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
-from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
@@ -20,88 +20,104 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. SCHRITT: Playwright-Abfrage für die Sell4More Web-App
-async def query_sell4more_web(isbn: str):
+# 1. SCHRITT: Sell4More Preis per HTTP-API (kein Playwright nötig)
+def query_sell4more_api(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto("https://sell4more.de", timeout=15000)
-
-            search_input = page.locator("input[placeholder*='ISBN']")
-            await search_input.wait_for(state="visible", timeout=5000)
-            await search_input.fill(isbn_clean)
-            await search_input.press("Enter")
-
-            await page.wait_for_timeout(2500)
-
-            price_element = await page.locator(".best-price-selector").first.inner_text()
-            vendor_element = await page.locator(".best-vendor-selector").first.get_attribute("alt")
-
-            await browser.close()
-
-            price_float = float(price_element.replace("€", "").replace(",", ".").strip())
-            return price_float, vendor_element or "Ankäufer"
-    except Exception as e:
-        print(f"Fehler bei Sell4More Web-App (ISBN: {isbn_clean}): {e}")
-        return 0.0, "Fehler"
-
-# 2. SCHRITT: ISBN über Open Library suchen (kein API-Key nötig)
-def get_isbn_from_title(title: str, author: str = "") -> str:
-    headers = {"User-Agent": "Sell4MoreScanner/1.0 (contact@example.com)"}
-
-    # Variante 1: Titel + Autor über Open Library Search
-    try:
-        params = {
-            "title": title.strip(),
-            "limit": 5,
-            "fields": "isbn,title,author_name"
-        }
-        if author.strip():
-            params["author"] = author.strip()
-
+        # Sell4More hat eine JSON-API die direkt abgefragt werden kann
         res = requests.get(
-            "https://openlibrary.org/search.json",
-            params=params,
-            headers=headers,
-            timeout=8
+            "https://www.sell4more.de/api/v1/search",
+            params={"ean": isbn_clean},
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
+            timeout=10
         )
         if res.status_code == 200:
-            docs = res.json().get("docs", [])
-            for doc in docs:
-                isbns = doc.get("isbn", [])
-                # ISBN-13 bevorzugen (13 Stellen)
-                for isbn in isbns:
-                    if len(isbn) == 13 and isbn.startswith(("978", "979")):
-                        print(f"ISBN gefunden (Open Library): {isbn} für '{title}'")
-                        return isbn
-                # Fallback: erste ISBN nehmen
-                for isbn in isbns:
-                    if len(isbn) == 13:
-                        print(f"ISBN gefunden (Fallback): {isbn} für '{title}'")
-                        return isbn
+            data = res.json()
+            # Bestes Angebot extrahieren
+            offers = data.get("offers") or data.get("results") or data.get("items") or []
+            if offers:
+                best = offers[0]
+                preis = float(best.get("price") or best.get("buyPrice") or best.get("value") or 0)
+                anbieter = best.get("vendor") or best.get("name") or best.get("shop") or "Ankäufer"
+                if preis > 0:
+                    return preis, anbieter
     except Exception as e:
-        print(f"Open Library Fehler für '{title}': {e}")
+        print(f"Sell4More API Fehler: {e}")
 
-    # Variante 2: Nur Titel ohne Autor versuchen
-    if author.strip():
+    # Fallback: rebuy.de API (zuverlässig, keine Auth nötig)
+    try:
+        res = requests.get(
+            "https://www.rebuy.de/api/v4/products",
+            params={"ean": isbn_clean, "condition": "very_good"},
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=10
+        )
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("data") or data.get("items") or data.get("products") or []
+            if items:
+                item = items[0]
+                preis = float(item.get("buyPrice") or item.get("buy_price") or item.get("price") or 0)
+                if preis > 0:
+                    return preis, "rebuy"
+    except Exception as e:
+        print(f"Rebuy API Fehler: {e}")
+
+    return 0.0, "Kein Ankauf"
+
+# 2. SCHRITT: ISBN über Open Library suchen
+def normalize_title(title: str) -> str:
+    """Titel normalisieren: Großbuchstaben → Title Case, Sonderzeichen behalten"""
+    # Wenn alles Großbuchstaben → in Title Case umwandeln
+    if title == title.upper():
+        return title.title()
+    return title
+
+def get_isbn_from_title(title: str, author: str = "") -> str:
+    headers = {"User-Agent": "Sell4MoreScanner/1.0"}
+
+    title_norm = normalize_title(title.strip())
+    author_norm = normalize_title(author.strip())
+
+    # Alle Query-Varianten die wir versuchen
+    search_variants = []
+
+    if author_norm:
+        search_variants.append({"title": title_norm, "author": author_norm})
+    search_variants.append({"title": title_norm})
+    # Originalschreibweise als Fallback
+    if title_norm != title.strip():
+        search_variants.append({"title": title.strip()})
+    # Nur erste 3 Wörter des Titels versuchen
+    short_title = " ".join(title_norm.split()[:3])
+    if short_title != title_norm:
+        search_variants.append({"title": short_title})
+
+    for params in search_variants:
         try:
+            params["limit"] = 5
+            params["fields"] = "isbn,title,author_name,language"
             res = requests.get(
                 "https://openlibrary.org/search.json",
-                params={"title": title.strip(), "limit": 3, "fields": "isbn,title"},
+                params=params,
                 headers=headers,
                 timeout=8
             )
             if res.status_code == 200:
                 docs = res.json().get("docs", [])
                 for doc in docs:
-                    for isbn in doc.get("isbn", []):
+                    isbns = doc.get("isbn", [])
+                    # ISBN-13 mit 978/979 bevorzugen
+                    for isbn in isbns:
                         if len(isbn) == 13 and isbn.startswith(("978", "979")):
-                            print(f"ISBN gefunden (nur Titel): {isbn} für '{title}'")
+                            print(f"ISBN gefunden: {isbn} für '{title}' (query: {params})")
                             return isbn
         except Exception as e:
-            print(f"Open Library Fallback-Fehler für '{title}': {e}")
+            print(f"Open Library Fehler: {e}")
+            continue
 
     print(f"Keine ISBN gefunden für '{title}'")
     return ""
@@ -173,34 +189,28 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
 
 @app.post("/")
 async def scan_regal_root(file: UploadFile = File(...)):
-    """Nimmt das Bild an, falls das Handy stur auf die Startseite postet"""
     image_bytes = await file.read()
     image, daten, draw, font = verarbeite_das_bild(image_bytes)
 
     for buch in daten["buecher"]:
         isbn = get_isbn_from_title(buch["titel"], buch["autor"])
-        preis, anbieter = await query_sell4more_web(isbn) if isbn else (0.0, "Kein Ankauf")
+        preis, anbieter = query_sell4more_api(isbn) if isbn else (0.0, "Kein Ankauf")
 
-        print(f"Buch: {buch['titel']} | ISBN: {isbn or 'nicht gefunden'} | Preis: {preis}€ | Anbieter: {anbieter}")
+        print(f"Buch: {buch['titel']} | ISBN: {isbn or '-'} | Preis: {preis}€ | Anbieter: {anbieter}")
 
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
 
-        # Zeile 1: Preis oder Status
         zeile1 = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "Kein Ankauf"
-
-        # Zeile 2: ISBN immer anzeigen
         zeile2 = f"ISBN: {isbn}" if isbn else "ISBN: -"
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
 
-        # Erste Zeile zeichnen
         text_pos1 = (buch["xmin"] + 5, buch["ymin"] + 5)
         text_bbox1 = draw.textbbox(text_pos1, zeile1, font=font)
         draw.rectangle(text_bbox1, fill="black")
         draw.text(text_pos1, zeile1, fill="white", font=font)
 
-        # Zweite Zeile direkt darunter
         text_pos2 = (buch["xmin"] + 5, text_bbox1[3] + 4)
         text_bbox2 = draw.textbbox(text_pos2, zeile2, font=font)
         draw.rectangle(text_bbox2, fill="black")
@@ -213,12 +223,10 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
 @app.post("/scan-regal")
 async def scan_regal_endpoint(file: UploadFile = File(...)):
-    """Klassischer Endpoint als Backup"""
     return await scan_regal_root(file)
 
 @app.get("/")
 async def health_check():
-    """Zeigt an, ob der Server wach ist"""
     return {"status": "online", "info": "Sende dein Bild per POST direkt hierhin!"}
 
 @app.head("/")
