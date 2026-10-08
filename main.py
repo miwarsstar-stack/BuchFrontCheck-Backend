@@ -146,7 +146,8 @@ async def scan_regal_root(file: UploadFile = File(...)):
         preis, anbieter = await query_sell4more_web(isbn) if isbn else (0.0, "Kein Ankauf")
 
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
-        preis_text = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "0.00€"
+        isbn_label = f" | {isbn}" if isbn else ""
+preis_text = f"{anbieter}: {preis:.2f}€{isbn_label}" if preis > 0.0 else f"0.00€{isbn_label}"
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
