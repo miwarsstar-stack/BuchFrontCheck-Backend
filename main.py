@@ -2,7 +2,7 @@ import io
 import base64
 import json
 import asyncio
-import requests
+import aiohttp
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +21,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# 1. ISBN über Google Books suchen (async, kein Block)
+async def get_isbn_from_title_async(session: aiohttp.ClientSession, title: str, author: str = "") -> str:
+    queries = []
+    if author:
+        queries.append(f"intitle:{title}+inauthor:{author}")
+    queries.append(f"intitle:{title}")
+
+    for q in queries:
+        try:
+            url = f"https://www.googleapis.com/books/v1/volumes?q={aiohttp.helpers.requote_uri(q)}&maxResults=5&langRestrict=de"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    for item in data.get("items", []):
+                        identifiers = item.get("volumeInfo", {}).get("industryIdentifiers", [])
+                        for ident in identifiers:
+                            if ident.get("type") in ("ISBN_13",):
+                                isbn = ident["identifier"]
+                                print(f"ISBN gefunden: {isbn} für '{title}'")
+                                return isbn
+        except Exception as e:
+            print(f"Google Books Fehler für '{title}': {e}")
+
+    print(f"Keine ISBN gefunden für '{title}'")
+    return ""
+
+
+# 2. Bonavendi per Playwright
 async def query_bonavendi(isbn: str) -> tuple[float, str]:
     isbn_clean = isbn.replace("-", "").strip()
     try:
@@ -45,7 +74,6 @@ async def query_bonavendi(isbn: str) -> tuple[float, str]:
                             pass
 
             page.on("response", handle_response)
-
             await page.goto(f"https://www.bonavendi.de/verkaufen/?ean={isbn_clean}", timeout=20000)
             await page.wait_for_timeout(4000)
 
@@ -86,51 +114,7 @@ async def query_bonavendi(isbn: str) -> tuple[float, str]:
     return 0.0, "Kein Ankauf"
 
 
-def normalize_title(title: str) -> str:
-    if title == title.upper():
-        return title.title()
-    return title
-
-
-def get_isbn_from_title(title: str, author: str = "") -> str:
-    headers = {"User-Agent": "Sell4MoreScanner/1.0"}
-    title_norm = normalize_title(title.strip())
-    author_norm = normalize_title(author.strip())
-
-    search_variants = []
-    if author_norm:
-        search_variants.append({"title": title_norm, "author": author_norm})
-    search_variants.append({"title": title_norm})
-    if title_norm != title.strip():
-        search_variants.append({"title": title.strip()})
-    short_title = " ".join(title_norm.split()[:3])
-    if short_title != title_norm:
-        search_variants.append({"title": short_title})
-
-    for params in search_variants:
-        try:
-            params["limit"] = 5
-            params["fields"] = "isbn,title,author_name"
-            res = requests.get(
-                "https://openlibrary.org/search.json",
-                params=params,
-                headers=headers,
-                timeout=8
-            )
-            if res.status_code == 200:
-                docs = res.json().get("docs", [])
-                for doc in docs:
-                    for isbn in doc.get("isbn", []):
-                        if len(isbn) == 13 and isbn.startswith(("978", "979")):
-                            print(f"ISBN gefunden: {isbn} für '{title}'")
-                            return isbn
-        except Exception as e:
-            print(f"Open Library Fehler: {e}")
-
-    print(f"Keine ISBN gefunden für '{title}'")
-    return ""
-
-
+# 3. Bild verarbeiten mit GPT-4o
 def verarbeite_das_bild(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image.thumbnail((1024, 1024), Image.LANCZOS)
@@ -198,14 +182,32 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
     return image, daten, draw, font
 
 
+# 4. ENDPOINTS
+
 @app.post("/")
 async def scan_regal_root(file: UploadFile = File(...)):
     image_bytes = await file.read()
     image, daten, draw, font = verarbeite_das_bild(image_bytes)
 
-    for buch in daten["buecher"]:
-        isbn = get_isbn_from_title(buch["titel"], buch["autor"])
-        preis, anbieter = await query_bonavendi(isbn) if isbn else (0.0, "Kein Ankauf")
+    # Alle ISBN-Suchen parallel
+    async with aiohttp.ClientSession() as session:
+        isbn_tasks = [
+            get_isbn_from_title_async(session, b["titel"], b["autor"])
+            for b in daten["buecher"]
+        ]
+        isbns = await asyncio.gather(*isbn_tasks)
+
+    # Alle Bonavendi-Abfragen parallel
+    bonavendi_tasks = [
+        query_bonavendi(isbn) if isbn else asyncio.coroutine(lambda: (0.0, "Kein Ankauf"))()
+        for isbn in isbns
+    ]
+    preise = await asyncio.gather(*bonavendi_tasks, return_exceptions=True)
+
+    for i, buch in enumerate(daten["buecher"]):
+        isbn = isbns[i]
+        result = preise[i]
+        preis, anbieter = result if not isinstance(result, Exception) else (0.0, "Kein Ankauf")
 
         print(f"Buch: {buch['titel']} | ISBN: {isbn or '-'} | Preis: {preis}€ | Anbieter: {anbieter}")
 
