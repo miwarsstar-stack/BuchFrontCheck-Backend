@@ -126,6 +126,7 @@ Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspri
 
     # FIX: choices[0] statt choices
     daten = json.loads(response.choices[0].message.content)
+    print("GPT Antwort:", json.dumps(daten, ensure_ascii=False, indent=2))
     draw = ImageDraw.Draw(image)
     try: font = ImageFont.load_default(size=24)
     except: font = ImageFont.load_default()
