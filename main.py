@@ -47,28 +47,46 @@ async def query_sell4more_web(isbn: str):
         print(f"Fehler bei Sell4More Web-App (ISBN: {isbn_clean}): {e}")
         return 0.0, "Fehler"
 
-# 2. SCHRITT: Titel in ISBN umwandeln
+# 2. SCHRITT: Titel in ISBN umwandeln (FIX: korrekter Query + Fallback)
 def get_isbn_from_title(title: str, author: str = "") -> str:
-    query = f"intitle:{title}"
-    if author:
-        query += f"+inauthor:{author}"
-    try:
-        res = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params={"q": query, "maxResults": 1},
-            timeout=5
-        )
-        if res.status_code == 200:
-            items = res.json().get("items", [])
-            if items:
-                for identifier in items[0]["volumeInfo"].get("industryIdentifiers", []):
-                    if identifier["type"] == "ISBN_13":
-                        isbn = identifier["identifier"]
-                        print(f"ISBN gefunden: {isbn} für '{title}'")
-                        return isbn
-        print(f"Keine ISBN gefunden für '{title}'")
-    except Exception as e:
-        print(f"ISBN-Fehler für '{title}': {e}")
+    # Titel normalisieren: Großbuchstaben → Kleinbuchstaben
+    title_clean = title.strip().lower()
+    author_clean = author.strip().lower()
+
+    # Verschiedene Query-Varianten versuchen
+    queries = [
+        f'intitle:"{title_clean}"',
+        f'intitle:{title_clean}',
+        title_clean,
+    ]
+    if author_clean:
+        queries = [
+            f'intitle:"{title_clean}" inauthor:"{author_clean}"',
+            f'intitle:"{title_clean}"',
+            f'intitle:{title_clean} inauthor:{author_clean}',
+            title_clean,
+        ]
+
+    for query in queries:
+        try:
+            res = requests.get(
+                "https://www.googleapis.com/books/v1/volumes",
+                params={"q": query, "maxResults": 3, "langRestrict": "de"},
+                timeout=5
+            )
+            if res.status_code == 200:
+                items = res.json().get("items", [])
+                for item in items:
+                    for identifier in item["volumeInfo"].get("industryIdentifiers", []):
+                        if identifier["type"] == "ISBN_13":
+                            isbn = identifier["identifier"]
+                            print(f"ISBN gefunden: {isbn} für '{title}' (query: {query})")
+                            return isbn
+        except Exception as e:
+            print(f"ISBN-Fehler für '{title}': {e}")
+            continue
+
+    print(f"Keine ISBN gefunden für '{title}'")
     return ""
 
 # 3. SCHRITT: Das Bild-Verarbeitungs-Gehirn
@@ -150,33 +168,29 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
         farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
 
-        # ISBN immer anzeigen — auch wenn kein Preis gefunden wurde
-        if isbn:
-            if preis > 0.0:
-                zeile1 = f"{anbieter}: {preis:.2f}€"
-                zeile2 = f"ISBN: {isbn}"
-            else:
-                zeile1 = "Kein Ankauf"
-                zeile2 = f"ISBN: {isbn}"
+        # Zeile 1: Preis oder Status
+        if preis > 0.0:
+            zeile1 = f"{anbieter}: {preis:.2f}€"
         else:
-            zeile1 = f"{anbieter}: {preis:.2f}€" if preis > 0.0 else "Kein Ankauf / Keine ISBN"
-            zeile2 = None
+            zeile1 = "Kein Ankauf"
+
+        # Zeile 2: ISBN (immer wenn vorhanden)
+        zeile2 = f"ISBN: {isbn}" if isbn else "ISBN: nicht gefunden"
 
         box = (buch["xmin"], buch["ymin"], buch["xmax"], buch["ymax"])
         draw.rectangle(box, outline=farbe, width=6)
 
-        # Erste Zeile (Preis)
+        # Erste Zeile zeichnen
         text_pos1 = (buch["xmin"] + 5, buch["ymin"] + 5)
         text_bbox1 = draw.textbbox(text_pos1, zeile1, font=font)
         draw.rectangle(text_bbox1, fill="black")
         draw.text(text_pos1, zeile1, fill="white", font=font)
 
-        # Zweite Zeile (ISBN) direkt darunter
-        if zeile2:
-            text_pos2 = (buch["xmin"] + 5, text_bbox1[3] + 4)
-            text_bbox2 = draw.textbbox(text_pos2, zeile2, font=font)
-            draw.rectangle(text_bbox2, fill="black")
-            draw.text(text_pos2, zeile2, fill="white", font=font)
+        # Zweite Zeile direkt darunter
+        text_pos2 = (buch["xmin"] + 5, text_bbox1[3] + 4)
+        text_bbox2 = draw.textbbox(text_pos2, zeile2, font=font)
+        draw.rectangle(text_bbox2, fill="black")
+        draw.text(text_pos2, zeile2, fill="white", font=font)
 
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='JPEG')
