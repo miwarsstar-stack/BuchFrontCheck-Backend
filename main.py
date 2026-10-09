@@ -190,9 +190,11 @@ Produktcode:"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini-search-preview",
-            messages=[{"role": "user", "content": prompt}],
-        )
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0,
+    max_tokens=30,
+)
         result = response.choices[0].message.content.strip()
         print(f"Search-Preview Antwort fuer '{titel}': {result[:100]}")
 
