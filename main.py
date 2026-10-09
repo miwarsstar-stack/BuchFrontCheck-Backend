@@ -2,6 +2,7 @@ import io
 import base64
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
 client = OpenAI()
+executor = ThreadPoolExecutor(max_workers=5)
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,74 +23,30 @@ app.add_middleware(
 )
 
 
-# 1. Bild analysieren + ISBNs direkt von GPT-4o ermitteln lassen
-def verarbeite_das_bild(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image.thumbnail((1024, 1024), Image.LANCZOS)
-
-    buffered = io.BytesIO()
-    image.save(buffered, format="JPEG", quality=95)
-    base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "regal_erkennung",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "buecher": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "titel": {"type": "string"},
-                                "autor": {"type": "string"},
-                                "isbn": {"type": "string"},
-                                "ymin": {"type": "integer"},
-                                "xmin": {"type": "integer"},
-                                "ymax": {"type": "integer"},
-                                "xmax": {"type": "integer"}
-                            },
-                            "required": ["titel", "autor", "isbn", "ymin", "xmin", "ymax", "xmax"],
-                            "additionalProperties": False
-                        }
-                    }
-                },
-                "required": ["buecher"],
-                "additionalProperties": False
-            }
-        }
-    }
-
-    prompt = """Analysiere dieses Foto eines Bücherregals sehr genau.
-Erkenne jeden einzelnen sichtbaren Buchrücken.
-Für jedes Buch gib mir:
-- Den genauen Titel (wie auf dem Buchrücken geschrieben)
-- Den Autor (wie auf dem Buchrücken geschrieben)
-- Die ISBN-13 des Buches — nutze dein Trainingswissen um die korrekte ISBN zu ermitteln. Falls du dir nicht sicher bist, gib eine leere Zeichenkette "" zurück.
-- Die exakten Pixelkoordinaten des Buchrückens: xmin, ymin (obere linke Ecke) und xmax, ymax (untere rechte Ecke).
-Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspringe kein Buch."""
-
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        ]}],
-        response_format=response_format
-    )
-
-    daten = json.loads(response.choices[0].message.content)
-    print("GPT Antwort:", json.dumps(daten, ensure_ascii=False, indent=2))
-    draw = ImageDraw.Draw(image)
+# 1. ISBN per GPT-4o-search-preview (live Websuche)
+def get_isbn_via_search(titel: str, autor: str) -> str:
     try:
-        font = ImageFont.load_default(size=24)
-    except:
-        font = ImageFont.load_default()
-
-    return image, daten, draw, font
+        query = f"ISBN-13 des Buches \"{titel}\" von \"{autor}\""
+        if not autor:
+            query = f"ISBN-13 des Buches \"{titel}\""
+        response = client.chat.completions.create(
+            model="gpt-4o-search-preview",
+            messages=[{"role": "user", "content": 
+                f"Was ist die ISBN-13 des Buches '{titel}' von '{autor}'? "
+                f"Antworte NUR mit der 13-stelligen ISBN-Zahl, ohne Text davor oder danach. "
+                f"Falls du keine eindeutige ISBN findest, antworte mit leer."
+            }]
+        )
+        result = response.choices[0].message.content.strip()
+        # Nur Ziffern extrahieren
+        digits = "".join(c for c in result if c.isdigit())
+        if len(digits) == 13 and digits.startswith(("978", "979")):
+            print(f"ISBN gefunden: {digits} für '{titel}'")
+            return digits
+        print(f"Keine gültige ISBN für '{titel}': {result}")
+    except Exception as e:
+        print(f"ISBN-Suche Fehler für '{titel}': {e}")
+    return ""
 
 
 # 2. Bonavendi per Playwright
@@ -160,22 +118,98 @@ async def kein_ankauf() -> tuple[float, str]:
     return 0.0, "Kein Ankauf"
 
 
-# 3. ENDPOINTS
+# 3. Bild verarbeiten mit GPT-4o
+def verarbeite_das_bild(image_bytes):
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image.thumbnail((1024, 1024), Image.LANCZOS)
+
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG", quality=95)
+    base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "regal_erkennung",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "buecher": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "titel": {"type": "string"},
+                                "autor": {"type": "string"},
+                                "ymin": {"type": "integer"},
+                                "xmin": {"type": "integer"},
+                                "ymax": {"type": "integer"},
+                                "xmax": {"type": "integer"}
+                            },
+                            "required": ["titel", "autor", "ymin", "xmin", "ymax", "xmax"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["buecher"],
+                "additionalProperties": False
+            }
+        }
+    }
+
+    prompt = """Analysiere dieses Foto eines Bücherregals sehr genau.
+Erkenne jeden einzelnen sichtbaren Buchrücken.
+Für jedes Buch gib mir:
+- Den genauen Titel (wie auf dem Buchrücken geschrieben)
+- Den Autor (wie auf dem Buchrücken geschrieben)
+- Die exakten Pixelkoordinaten des Buchrückens: xmin, ymin (obere linke Ecke) und xmax, ymax (untere rechte Ecke).
+Die Koordinaten müssen den Buchrücken eng und präzise umschließen. Überspringe kein Buch."""
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        ]}],
+        response_format=response_format
+    )
+
+    daten = json.loads(response.choices[0].message.content)
+    print("GPT Antwort:", json.dumps(daten, ensure_ascii=False, indent=2))
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.load_default(size=24)
+    except:
+        font = ImageFont.load_default()
+
+    return image, daten, draw, font
+
+
+# 4. ENDPOINTS
 
 @app.post("/")
 async def scan_regal_root(file: UploadFile = File(...)):
     image_bytes = await file.read()
     image, daten, draw, font = verarbeite_das_bild(image_bytes)
 
+    # Alle ISBN-Suchen parallel (in ThreadPool weil synchron)
+    loop = asyncio.get_event_loop()
+    isbn_tasks = [
+        loop.run_in_executor(executor, get_isbn_via_search, b["titel"], b["autor"])
+        for b in daten["buecher"]
+    ]
+    isbns = await asyncio.gather(*isbn_tasks)
+
     # Alle Bonavendi-Abfragen parallel
     bonavendi_tasks = [
-        query_bonavendi(b["isbn"]) if b.get("isbn") else kein_ankauf()
-        for b in daten["buecher"]
+        query_bonavendi(isbn) if isbn else kein_ankauf()
+        for isbn in isbns
     ]
     preise = await asyncio.gather(*bonavendi_tasks, return_exceptions=True)
 
     for i, buch in enumerate(daten["buecher"]):
-        isbn = buch.get("isbn", "")
+        isbn = isbns[i]
         result = preise[i]
         preis, anbieter = result if not isinstance(result, Exception) else (0.0, "Kein Ankauf")
 
