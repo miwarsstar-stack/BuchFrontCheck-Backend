@@ -90,21 +90,19 @@ Fuer jedes Medium erfasse folgende Informationen so praezise wie moeglich:
 
 1. TITEL: exakt wie auf dem Ruecken/Cover geschrieben
 2. AUTOR / INTERPRET / HERSTELLER: wie angegeben
-3. VERLAG / LABEL / PUBLISHER: falls sichtbar
+3. VERLAG / LABEL / PUBLISHER: falls sichtbar, sonst leer lassen
 4. ERSCHEINUNGSJAHR (Schaetzung): anhand von Design, Schriftbild, Logo-Stil, Papierfarbe
-5. FORMAT: Taschenbuch, Hardcover, Grossformat, DVD, CD, Blu-ray, etc.
+5. FORMAT: Taschenbuch, Hardcover, Grossformat, DVD, CD, Blu-ray etc.
 6. RUECKENDICKE (geschaetzt in mm): wichtig fuer Ausgabenerkennung
 7. COVER-FARBEN: dominante Farben des Rueckens/Covers
 8. BESONDERE MERKMALE: Praegungen, Folienveredelung, Sticker, Sonderausgabe-Aufdruck,
-   Jubilaemsedition, Filmtie-in-Cover, Buchclub-Ausgabe, Taschenbuchclub etc.
-9. SCHRIFTSTIL: Charakteristik der Titelschrift (Farbe, Stil, Groesse, Besonderheiten)
+   Jubilaemsedition, Filmtie-in-Cover, Buchclub-Ausgabe etc.
+9. SCHRIFTSTIL: Charakteristik der Titelschrift (Farbe, Stil, Groesse)
 10. AUFLAGEN-HINWEIS: sichtbare Hinweise auf Auflage oder Edition
 11. MEDIUM-TYP: Buch, DVD, CD, Blu-ray, Spiel, Sonstiges
 
 Gib fuer jedes Medium die exakten Pixelkoordinaten: xmin/ymin (oben links), xmax/ymax (unten rechts).
-Die Box soll das Medium eng umschliessen.
-
-Ueberspringe kein Medium, auch wenn es schwer lesbar ist - schaetze so gut wie moeglich."""
+Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -131,8 +129,9 @@ Ueberspringe kein Medium, auch wenn es schwer lesbar ist - schaetze so gut wie m
 
 
 # ---------------------------------------------------------------------------
-# 2. ISBN/EAN per KI - reine Recherche ohne externe Datenbanken
-#    Unterstuetzt: ISBN-13 (978/979), ISBN-10, EAN, UPC, sonstige Produktcodes
+# 2. ISBN/EAN per gpt-4o-search-preview (Live-Websuche)
+#    + visuelle Merkmale fuer Ausgabenbestimmung
+#    Unterstuetzt: ISBN-13 (978/979), ISBN-10, EAN fuer DVDs/CDs/Spiele
 # ---------------------------------------------------------------------------
 def get_identifier_via_ki(medium: dict) -> str:
     titel = medium.get("titel", "")
@@ -147,18 +146,26 @@ def get_identifier_via_ki(medium: dict) -> str:
     auflage = medium.get("auflage_hinweis", "")
     medium_typ = medium.get("medium_typ", "Buch")
 
-    prompt = f"""Du bist ein Experte fuer Medienidentifikation (Buecher, DVDs, CDs, Spiele, Hoerbucher).
+    # Suchquery aufbauen
+    query_teile = [titel]
+    if autor:
+        query_teile.append(autor)
+    if verlag:
+        query_teile.append(verlag)
+    if format_ and format_ not in ("Buch",):
+        query_teile.append(format_)
+    query = " ".join(query_teile)
 
-Deine Aufgabe: Bestimme die exakte ISBN, EAN oder einen anderen Produktcode fuer das folgende Medium.
-Nutze AUSSCHLIESSLICH dein eigenes Wissen - keine externen Datenbanken, keine Websuche.
+    prompt = f"""Du bist ein Experte fuer Medienidentifikation. Nutze die Live-Websuche um den
+exakten Produktcode (ISBN, EAN) fuer dieses Medium zu finden.
 
-Visuelle Merkmale des Mediums (vom Foto erfasst):
-- Titel: {titel}
-- Autor/Interpret/Hersteller: {autor}
-- Verlag/Label: {verlag}
+Suchanfrage: {query}
+
+Zusaetzliche visuelle Merkmale vom Foto (helfen bei der Ausgabenbestimmung):
 - Medium-Typ: {medium_typ}
 - Format: {format_}
-- Geschaetzte Rueckendicke: {dicke} mm
+- Verlag/Label: {verlag}
+- Geschaetzte Rueckendicke: {dicke} mm  (Dicke ~ Seitenanzahl -> hilft Ausgabe eingrenzen)
 - Erscheinungsjahr (Schaetzung): {erscheinungsjahr}
 - Dominante Coverfarben: {farbe}
 - Besondere Merkmale: {merkmale}
@@ -166,50 +173,55 @@ Visuelle Merkmale des Mediums (vom Foto erfasst):
 - Auflagen-Hinweis: {auflage}
 
 Vorgehensweise:
-1. Identifiziere zuerst das genaue Werk (Titel + Autor + Verlag)
-2. Nutze die visuellen Merkmale (Dicke -> Seitenanzahl, Farbe, Praegungen, Editionen-Aufdruck)
-   um die EXAKTE Ausgabe/Auflage/Edition zu bestimmen
-3. Pruefe intern: Stimmt die ISBN mit Dicke und Verlag ueberein?
-4. Gib den Produktcode aus
+1. Suche online nach dem genauen Produktcode fuer dieses Medium
+2. Nutze die visuellen Merkmale um die richtige Ausgabe/Auflage zu identifizieren
+   (z.B. Rueckendicke passt zur Seitenanzahl einer bestimmten Auflage)
+3. Verifiziere den gefundenen Code gegen Verlag und Format
 
-Regeln:
-- ISBN-13 beginnt mit 978 oder 979 (13 Ziffern)
-- ISBN-10 hat 10 Zeichen (Ziffern + ggf. X am Ende)
-- EAN fuer DVDs/CDs/Spiele ist ebenfalls 13-stellig, beginnt aber NICHT zwingend mit 978/979
-- Antworte NUR mit dem Produktcode selbst, ohne Text davor oder danach
-- Wenn du fuer diese spezifische Ausgabe keinen sicheren Code kennst: antworte mit "unbekannt"
-- Raten ist schlechter als "unbekannt" - nur ausgeben wenn du dir sicher bist
+Regeln fuer den Produktcode:
+- ISBN-13: 13 Ziffern, beginnt mit 978 oder 979
+- ISBN-10: 10 Zeichen (Ziffern, letztes Zeichen darf X sein)
+- EAN: 8-13 Ziffern (fuer DVDs, CDs, Spiele - beginnt NICHT zwingend mit 978/979)
+
+Antworte NUR mit dem Produktcode selbst (nur Ziffern, keine Bindestriche, kein anderer Text).
+Wenn du nach gruendlicher Suche keinen sicheren Code findest: antworte mit dem Wort unbekannt.
 
 Produktcode:"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-search-preview",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=30,
         )
         result = response.choices[0].message.content.strip()
+        print(f"Search-Preview Antwort fuer '{titel}': {result[:100]}")
 
-        cleaned = "".join(c for c in result if c.isalnum() or c == "-" or c == "X")
+        # Bereinigen
+        cleaned = result.replace("-", "").replace(" ", "")
+        cleaned = "".join(c for c in cleaned if c.isdigit() or c.upper() == "X")
 
-        if cleaned.lower() in ("", "unbekannt", "unknown", "keine", "leer"):
+        if "unbekannt" in result.lower() or "unknown" in result.lower() or not cleaned:
             print(f"KI: Kein Produktcode fuer '{titel}'")
             return ""
 
-        digits_only = "".join(c for c in cleaned if c.isdigit())
-        is_isbn10 = len(cleaned.replace("-", "")) == 10
-        is_ean = 8 <= len(digits_only) <= 13
+        # ISBN-10: genau 10 Zeichen (9 Ziffern + Ziffer oder X)
+        is_isbn10 = (
+            len(cleaned) == 10 and
+            cleaned[:9].isdigit() and
+            (cleaned[9].isdigit() or cleaned[9].upper() == "X")
+        )
+        # EAN/ISBN-13: 8 bis 13 Ziffern
+        is_ean = cleaned.isdigit() and 8 <= len(cleaned) <= 13
 
         if is_isbn10 or is_ean:
-            print(f"KI Produktcode: '{cleaned}' fuer '{titel}' ({medium_typ})")
+            print(f"Produktcode gefunden: '{cleaned}' fuer '{titel}' ({medium_typ})")
             return cleaned
         else:
-            print(f"KI: Ungueltiges Format '{cleaned}' fuer '{titel}' - ignoriert")
+            print(f"Ungueltiges Format '{cleaned}' fuer '{titel}' - ignoriert")
             return ""
 
     except Exception as e:
-        print(f"KI ISBN-Fehler fuer '{titel}': {e}")
+        print(f"ISBN-Suche Fehler fuer '{titel}': {e}")
         return ""
 
 
@@ -328,13 +340,13 @@ async def scan_regal_root(file: UploadFile = File(...)):
             f"Typ: {medium.get('medium_typ','?')} | {preis}\u20ac bei {anbieter}"
         )
 
-        farbe = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
+        farbe_box = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
         zeile1 = f"{anbieter}: {preis:.2f}\u20ac" if preis > 0.0 else "Kein Ankauf"
         zeile2 = f"{ident}" if ident else "Code: unbekannt"
-        zeile3 = f"{medium.get('format','?')} | {medium.get('erscheinungsjahr_schaetzung','?')}"
+        zeile3 = f"{medium.get('format','?')} | ca. {medium.get('erscheinungsjahr_schaetzung','?')}"
 
         box = (medium["xmin"], medium["ymin"], medium["xmax"], medium["ymax"])
-        draw.rectangle(box, outline=farbe, width=6)
+        draw.rectangle(box, outline=farbe_box, width=6)
 
         text_pos1 = (medium["xmin"] + 5, medium["ymin"] + 5)
         text_bbox1 = draw.textbbox(text_pos1, zeile1, font=font)
