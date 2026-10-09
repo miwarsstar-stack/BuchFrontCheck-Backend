@@ -60,12 +60,14 @@ def verarbeite_das_bild(image_bytes):
         }
     }
 
-    prompt = """Erkenne jedes Medium auf diesem Foto.
+    prompt = """Erkenne jedes Buch/CD/Spiel auf diesem Foto.
 
-Fuer jedes Medium gib an:
+Fuer jedes Buch/CD/Spiel gib an:
 - titel: Name des Mediums
-- isbn_ean: Den exakten Produktcode (ISBN oder EAN) anhand deines Wissens ueber dieses Medium. Nur Ziffern, keine Bindestriche. Wenn unbekannt: leerer String.
-- Pixelkoordinaten: xmin, ymin, xmax, ymax"""
+- isbn_ean: Recherchiere den exakten Produktcode (ISBN oder EAN) anhand deines Wissens ueber dieses Medium.
+   Prüfe das Ergebnis sorgfältig gegen und achte auf Merkmale auf dem Foto, z.B. Hardcover, Taschenbuch etc. zur exakten Code Bestimmung.
+   Nur Ziffern, keine Bindestriche. Wenn unbekannt: leerer String.
+- Pixelkoordinaten der einzelnen Medien auf dem Bild, von Ecke zu Ecke: xmin, ymin, xmax, ymax"""
 
     response = client.chat.completions.create(
         model="gpt-4o",
