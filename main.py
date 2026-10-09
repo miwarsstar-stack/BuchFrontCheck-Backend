@@ -23,7 +23,8 @@ app.add_middleware(
 )
 
 
-# 1. def get_isbn_via_search(titel: str, autor: str) -> str:
+# 1. ISBN per Web Search
+def get_isbn_via_search(titel: str, autor: str) -> str:
     try:
         response = client.responses.create(
             model="gpt-4o-mini",
