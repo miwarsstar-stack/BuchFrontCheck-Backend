@@ -73,7 +73,7 @@ Fuer jedes Buch/CD/Spiel gib an:
 - Pixelkoordinaten der einzelnen Medien auf dem Bild, von Ecke zu Ecke: xmin, ymin, xmax, ymax"""
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-6-luna",
         messages=[{
             "role": "user",
             "content": [
