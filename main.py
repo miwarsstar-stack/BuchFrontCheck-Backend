@@ -190,7 +190,7 @@ Produktcode:"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-search-preview",
+            model="gpt-4o-mini-search-preview",
             messages=[{"role": "user", "content": prompt}],
         )
         result = response.choices[0].message.content.strip()
