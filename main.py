@@ -2,7 +2,6 @@ import io
 import base64
 import json
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +11,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 app = FastAPI(title="Sell4More Live Grid API")
 client = OpenAI()
-executor = ThreadPoolExecutor(max_workers=5)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,31 +43,13 @@ def verarbeite_das_bild(image_bytes):
                             "type": "object",
                             "properties": {
                                 "titel": {"type": "string"},
-                                "autor": {"type": "string"},
-                                "verlag": {"type": "string"},
-                                "erscheinungsjahr_schaetzung": {"type": "string"},
-                                "format": {"type": "string"},
-                                "ruecken_dicke_mm": {"type": "string"},
-                                "cover_farbe": {"type": "string"},
-                                "cover_merkmale": {"type": "string"},
-                                "schrift_stil": {"type": "string"},
-                                "auflage_hinweis": {"type": "string"},
-                                "medium_typ": {"type": "string"},
                                 "isbn_ean": {"type": "string"},
                                 "ymin": {"type": "integer"},
                                 "xmin": {"type": "integer"},
                                 "ymax": {"type": "integer"},
                                 "xmax": {"type": "integer"}
                             },
-                            "required": [
-                                "titel", "autor", "verlag",
-                                "erscheinungsjahr_schaetzung", "format",
-                                "ruecken_dicke_mm", "cover_farbe",
-                                "cover_merkmale", "schrift_stil",
-                                "auflage_hinweis", "medium_typ",
-                                "isbn_ean",
-                                "ymin", "xmin", "ymax", "xmax"
-                            ],
+                            "required": ["titel", "isbn_ean", "ymin", "xmin", "ymax", "xmax"],
                             "additionalProperties": False
                         }
                     }
@@ -80,33 +60,12 @@ def verarbeite_das_bild(image_bytes):
         }
     }
 
-    prompt = """Du bist ein Experte fuer Buecher, Medien und Ausgabenbestimmung.
+    prompt = """Erkenne jedes Medium auf diesem Foto.
 
-Analysiere dieses Foto eines Regals oder einer Mediensammlung sehr genau.
-Erkenne jedes einzelne sichtbare Medium (Buch, DVD, CD, Blu-ray, Spiel etc.).
-
-Fuer jedes Medium erfasse folgende Informationen so praezise wie moeglich:
-
-1. TITEL: exakt wie auf dem Ruecken/Cover geschrieben
-2. AUTOR / INTERPRET / HERSTELLER: wie angegeben
-3. VERLAG / LABEL / PUBLISHER: falls sichtbar, sonst leer lassen
-4. ERSCHEINUNGSJAHR (Schaetzung): anhand von Design, Schriftbild, Logo-Stil, Papierfarbe
-5. FORMAT: Taschenbuch, Hardcover, Grossformat, DVD, CD, Blu-ray etc.
-6. RUECKENDICKE (geschaetzt in mm): wichtig fuer Ausgabenerkennung
-7. COVER-FARBEN: dominante Farben des Rueckens/Covers
-8. BESONDERE MERKMALE: Praegungen, Folienveredelung, Sticker, Sonderausgabe-Aufdruck,
-   Jubilaemsedition, Filmtie-in-Cover, Buchclub-Ausgabe etc.
-9. SCHRIFTSTIL: Charakteristik der Titelschrift (Farbe, Stil, Groesse)
-10. AUFLAGEN-HINWEIS: sichtbare Hinweise auf Auflage oder Edition
-11. MEDIUM-TYP: Buch, DVD, CD, Blu-ray, Spiel, Sonstiges
-12. ISBN / EAN: Bestimme anhand deines Wissens ueber dieses Werk die wahrscheinlichste
-    ISBN-13 (beginnt mit 978 oder 979) oder EAN. Nutze dabei Titel, Autor, Verlag, Format,
-    Erscheinungsjahr UND alle visuellen Merkmale (Farben, Schrift, Cover-Design) um die
-    genaue Ausgabe zu identifizieren. Gib NUR die Ziffern ohne Bindestriche an.
-    Falls du dir nicht sicher bist, gib einen leeren String "" zurueck — KEINE Erfindung.
-
-Gib fuer jedes Medium die exakten Pixelkoordinaten: xmin/ymin (oben links), xmax/ymax (unten rechts).
-Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
+Fuer jedes Medium gib an:
+- titel: Name des Mediums
+- isbn_ean: Den exakten Produktcode (ISBN oder EAN) anhand deines Wissens ueber dieses Medium. Nur Ziffern, keine Bindestriche. Wenn unbekannt: leerer String.
+- Pixelkoordinaten: xmin, ymin, xmax, ymax"""
 
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -121,7 +80,7 @@ Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
     )
 
     daten = json.loads(response.choices[0].message.content)
-    print("GPT Bilderkennung:", json.dumps(daten, ensure_ascii=False, indent=2))
+    print("GPT Erkennung:", json.dumps(daten, ensure_ascii=False, indent=2))
 
     draw = ImageDraw.Draw(image)
     try:
@@ -133,7 +92,7 @@ Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
 
 
 async def query_bonavendi(identifier: str) -> tuple[float, str]:
-    id_clean = identifier.replace("-", "").strip()
+    id_clean = identifier.strip()
     if not id_clean:
         return 0.0, "Kein Ankauf"
     try:
@@ -220,33 +179,27 @@ async def scan_regal_root(file: UploadFile = File(...)):
     bonavendi_tasks = []
     for m in medien:
         ident = m.get("isbn_ean", "").strip()
-        cleaned = "".join(c for c in ident if c.isdigit())
-        if cleaned and 8 <= len(cleaned) <= 13:
-            print(f"ISBN/EAN von GPT-4o fuer '{m['titel']}': {cleaned}")
-            bonavendi_tasks.append(query_bonavendi(cleaned))
+        if ident:
+            print(f"ISBN/EAN von GPT-4o fuer '{m['titel']}': {ident}")
+            bonavendi_tasks.append(query_bonavendi(ident))
         else:
-            if ident:
-                print(f"Ungueltiges ISBN-Format von GPT fuer '{m['titel']}': '{ident}' — uebersprungen")
-            else:
-                print(f"Keine ISBN von GPT fuer '{m['titel']}'")
+            print(f"Keine ISBN von GPT fuer '{m['titel']}'")
             bonavendi_tasks.append(kein_ankauf())
 
     preise = await asyncio.gather(*bonavendi_tasks, return_exceptions=True)
 
     for i, medium in enumerate(medien):
-        ident = "".join(c for c in medium.get("isbn_ean", "") if c.isdigit())
+        ident = medium.get("isbn_ean", "").strip()
         result = preise[i]
         preis, anbieter = result if not isinstance(result, Exception) else (0.0, "Kein Ankauf")
 
         print(
-            f"Medium: {medium['titel']} | Code: {ident or '-'} | "
-            f"Typ: {medium.get('medium_typ','?')} | {preis}\u20ac bei {anbieter}"
+            f"Medium: {medium['titel']} | Code: {ident or '-'} | {preis}\u20ac bei {anbieter}"
         )
 
         farbe_box = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
         zeile1 = f"{anbieter}: {preis:.2f}\u20ac" if preis > 0.0 else "Kein Ankauf"
-        zeile2 = f"{ident}" if ident else "ISBN: unbekannt"
-        zeile3 = f"{medium.get('format','?')} | ca. {medium.get('erscheinungsjahr_schaetzung','?')}"
+        zeile2 = ident if ident else "ISBN: unbekannt"
 
         box = (medium["xmin"], medium["ymin"], medium["xmax"], medium["ymax"])
         draw.rectangle(box, outline=farbe_box, width=6)
@@ -260,11 +213,6 @@ async def scan_regal_root(file: UploadFile = File(...)):
         text_bbox2 = draw.textbbox(text_pos2, zeile2, font=font)
         draw.rectangle(text_bbox2, fill="black")
         draw.text(text_pos2, zeile2, fill="white", font=font)
-
-        text_pos3 = (medium["xmin"] + 5, text_bbox2[3] + 4)
-        text_bbox3 = draw.textbbox(text_pos3, zeile3, font=font)
-        draw.rectangle(text_bbox3, fill="black")
-        draw.text(text_pos3, zeile3, fill="white", font=font)
 
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format="JPEG")
