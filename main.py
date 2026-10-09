@@ -23,15 +23,22 @@ app.add_middleware(
 )
 
 
-# 1. ISBN per Web Search
+# 1. ISBN per GPT-4o-search-preview (live Websuche)
 def get_isbn_via_search(titel: str, autor: str) -> str:
     try:
-        response = client.responses.create(
-            model="gpt-4o-mini",
-            tools=[{"type": "web_search_preview"}],
-            input=f"Was ist die ISBN-13 des Buches '{titel}' von '{autor}'? Antworte NUR mit der 13-stelligen ISBN-Zahl, ohne Text davor oder danach. Falls du keine eindeutige ISBN findest, antworte mit leer."
+        query = f"ISBN-13 des Buches \"{titel}\" von \"{autor}\""
+        if not autor:
+            query = f"ISBN-13 des Buches \"{titel}\""
+        response = client.chat.completions.create(
+            model="gpt-4o-search-preview",
+            messages=[{"role": "user", "content": 
+                f"Was ist die ISBN-13 des Buches '{titel}' von '{autor}'? "
+                f"Antworte NUR mit der 13-stelligen ISBN-Zahl, ohne Text davor oder danach. "
+                f"Falls du keine eindeutige ISBN findest, antworte mit leer."
+            }]
         )
-        result = response.output_text.strip()
+        result = response.choices[0].message.content.strip()
+        # Nur Ziffern extrahieren
         digits = "".join(c for c in result if c.isdigit())
         if len(digits) == 13 and digits.startswith(("978", "979")):
             print(f"ISBN gefunden: {digits} für '{titel}'")
