@@ -23,9 +23,6 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# 1. Bild analysieren: Regal erkennen + visuelle Merkmale je Medium erfassen
-# ---------------------------------------------------------------------------
 def verarbeite_das_bild(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image.thumbnail((1024, 1024), Image.LANCZOS)
@@ -128,11 +125,6 @@ Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
     return image, daten, draw, font
 
 
-# ---------------------------------------------------------------------------
-# 2. ISBN/EAN per gpt-4o-search-preview (Live-Websuche)
-#    + visuelle Merkmale fuer Ausgabenbestimmung
-#    Unterstuetzt: ISBN-13 (978/979), ISBN-10, EAN fuer DVDs/CDs/Spiele
-# ---------------------------------------------------------------------------
 def get_identifier_via_ki(medium: dict) -> str:
     titel = medium.get("titel", "")
     autor = medium.get("autor", "")
@@ -146,7 +138,6 @@ def get_identifier_via_ki(medium: dict) -> str:
     auflage = medium.get("auflage_hinweis", "")
     medium_typ = medium.get("medium_typ", "Buch")
 
-    # Suchquery aufbauen
     query_teile = [titel]
     if autor:
         query_teile.append(autor)
@@ -156,49 +147,36 @@ def get_identifier_via_ki(medium: dict) -> str:
         query_teile.append(format_)
     query = " ".join(query_teile)
 
-    prompt = f"""Du bist ein Experte fuer Medienidentifikation. Nutze die Live-Websuche um den
-exakten Produktcode (ISBN, EAN) fuer dieses Medium zu finden.
+    prompt = f"""Du bist ein Experte fuer Medienidentifikation.
+Bestimme den exakten Produktcode (ISBN, EAN) fuer dieses Medium.
 
-Suchanfrage: {query}
+Medium: {query}
 
-Zusaetzliche visuelle Merkmale vom Foto (helfen bei der Ausgabenbestimmung):
-- Medium-Typ: {medium_typ}
-- Format: {format_}
-- Verlag/Label: {verlag}
-- Geschaetzte Rueckendicke: {dicke} mm  (Dicke ~ Seitenanzahl -> hilft Ausgabe eingrenzen)
-- Erscheinungsjahr (Schaetzung): {erscheinungsjahr}
-- Dominante Coverfarben: {farbe}
-- Besondere Merkmale: {merkmale}
-- Schriftstil: {schrift}
-- Auflagen-Hinweis: {auflage}
+Visuelle Merkmale:
+- Typ: {medium_typ}, Format: {format_}, Verlag: {verlag}
+- Rueckendicke: {dicke} mm, Jahr (Schaetzung): {erscheinungsjahr}
+- Farben: {farbe}, Merkmale: {merkmale}
+- Schrift: {schrift}, Auflage: {auflage}
 
-Vorgehensweise:
-1. Suche online nach dem genauen Produktcode fuer dieses Medium
-2. Nutze die visuellen Merkmale um die richtige Ausgabe/Auflage zu identifizieren
-   (z.B. Rueckendicke passt zur Seitenanzahl einer bestimmten Auflage)
-3. Verifiziere den gefundenen Code gegen Verlag und Format
-
-Regeln fuer den Produktcode:
+Regeln:
 - ISBN-13: 13 Ziffern, beginnt mit 978 oder 979
-- ISBN-10: 10 Zeichen (Ziffern, letztes Zeichen darf X sein)
-- EAN: 8-13 Ziffern (fuer DVDs, CDs, Spiele - beginnt NICHT zwingend mit 978/979)
-
-Antworte NUR mit dem Produktcode selbst (nur Ziffern, keine Bindestriche, kein anderer Text).
-Wenn du nach gruendlicher Suche keinen sicheren Code findest: antworte mit dem Wort unbekannt.
+- ISBN-10: 10 Zeichen (Ziffern, letztes darf X sein)
+- EAN: 8-13 Ziffern (DVDs/CDs/Spiele beginnen nicht zwingend mit 978/979)
+- Antworte NUR mit dem Code, keine Bindestriche, kein anderer Text
+- Kein sicherer Code gefunden: antworte mit unbekannt
 
 Produktcode:"""
 
     try:
         response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0,
-    max_tokens=30,
-)
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=30,
+        )
         result = response.choices[0].message.content.strip()
-        print(f"Search-Preview Antwort fuer '{titel}': {result[:100]}")
+        print(f"KI Antwort fuer '{titel}': {result[:100]}")
 
-        # Bereinigen
         cleaned = result.replace("-", "").replace(" ", "")
         cleaned = "".join(c for c in cleaned if c.isdigit() or c.upper() == "X")
 
@@ -206,17 +184,15 @@ Produktcode:"""
             print(f"KI: Kein Produktcode fuer '{titel}'")
             return ""
 
-        # ISBN-10: genau 10 Zeichen (9 Ziffern + Ziffer oder X)
         is_isbn10 = (
             len(cleaned) == 10 and
             cleaned[:9].isdigit() and
             (cleaned[9].isdigit() or cleaned[9].upper() == "X")
         )
-        # EAN/ISBN-13: 8 bis 13 Ziffern
         is_ean = cleaned.isdigit() and 8 <= len(cleaned) <= 13
 
         if is_isbn10 or is_ean:
-            print(f"Produktcode gefunden: '{cleaned}' fuer '{titel}' ({medium_typ})")
+            print(f"Produktcode: '{cleaned}' fuer '{titel}' ({medium_typ})")
             return cleaned
         else:
             print(f"Ungueltiges Format '{cleaned}' fuer '{titel}' - ignoriert")
@@ -227,9 +203,6 @@ Produktcode:"""
         return ""
 
 
-# ---------------------------------------------------------------------------
-# 3. Bonavendi per Playwright
-# ---------------------------------------------------------------------------
 async def query_bonavendi(identifier: str) -> tuple[float, str]:
     id_clean = identifier.replace("-", "").strip()
     if not id_clean:
@@ -307,10 +280,6 @@ async def query_bonavendi(identifier: str) -> tuple[float, str]:
 async def kein_ankauf() -> tuple[float, str]:
     return 0.0, "Kein Ankauf"
 
-
-# ---------------------------------------------------------------------------
-# 4. ENDPOINTS
-# ---------------------------------------------------------------------------
 
 @app.post("/")
 async def scan_regal_root(file: UploadFile = File(...)):
