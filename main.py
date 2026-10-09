@@ -63,9 +63,12 @@ def verarbeite_das_bild(image_bytes):
     prompt = """Erkenne jedes Buch/CD/Spiel auf diesem Foto.
 
 Fuer jedes Buch/CD/Spiel gib an:
+- autor: Name des Autors
+-Publisher: Name des Veröffentlicher
 - titel: Name des Mediums
-- isbn_ean: Recherchiere den exakten Produktcode (ISBN oder EAN) anhand deines Wissens ueber dieses Medium.
-   Prüfe das Ergebnis sorgfältig gegen und achte auf Merkmale auf dem Foto, z.B. Hardcover, Taschenbuch etc. zur exakten Code Bestimmung.
+- isbn_ean: Achte auf die Bestimmung der Version, bei Büchern z.B. Hardcover, Taschenbuch etc. zur korrekten ISBN Bestimmung.
+   Recherchiere den exakten Produktcode (ISBN oder EAN) im Internet ueber dieses Medium.
+   Prüfe das Ergebnis sorgfältig gegen
    Nur Ziffern, keine Bindestriche. Wenn unbekannt: leerer String.
 - Pixelkoordinaten der einzelnen Medien auf dem Bild, von Ecke zu Ecke: xmin, ymin, xmax, ymax"""
 
