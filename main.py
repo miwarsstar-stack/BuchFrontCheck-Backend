@@ -55,6 +55,7 @@ def verarbeite_das_bild(image_bytes):
                                 "schrift_stil": {"type": "string"},
                                 "auflage_hinweis": {"type": "string"},
                                 "medium_typ": {"type": "string"},
+                                "isbn_ean": {"type": "string"},
                                 "ymin": {"type": "integer"},
                                 "xmin": {"type": "integer"},
                                 "ymax": {"type": "integer"},
@@ -66,6 +67,7 @@ def verarbeite_das_bild(image_bytes):
                                 "ruecken_dicke_mm", "cover_farbe",
                                 "cover_merkmale", "schrift_stil",
                                 "auflage_hinweis", "medium_typ",
+                                "isbn_ean",
                                 "ymin", "xmin", "ymax", "xmax"
                             ],
                             "additionalProperties": False
@@ -97,6 +99,11 @@ Fuer jedes Medium erfasse folgende Informationen so praezise wie moeglich:
 9. SCHRIFTSTIL: Charakteristik der Titelschrift (Farbe, Stil, Groesse)
 10. AUFLAGEN-HINWEIS: sichtbare Hinweise auf Auflage oder Edition
 11. MEDIUM-TYP: Buch, DVD, CD, Blu-ray, Spiel, Sonstiges
+12. ISBN / EAN: Bestimme anhand deines Wissens ueber dieses Werk die wahrscheinlichste
+    ISBN-13 (beginnt mit 978 oder 979) oder EAN. Nutze dabei Titel, Autor, Verlag, Format,
+    Erscheinungsjahr UND alle visuellen Merkmale (Farben, Schrift, Cover-Design) um die
+    genaue Ausgabe zu identifizieren. Gib NUR die Ziffern ohne Bindestriche an.
+    Falls du dir nicht sicher bist, gib einen leeren String "" zurueck — KEINE Erfindung.
 
 Gib fuer jedes Medium die exakten Pixelkoordinaten: xmin/ymin (oben links), xmax/ymax (unten rechts).
 Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
@@ -123,84 +130,6 @@ Ueberspringe kein Medium, auch wenn es schwer lesbar ist."""
         font = ImageFont.load_default()
 
     return image, daten, draw, font
-
-
-def get_identifier_via_ki(medium: dict) -> str:
-    titel = medium.get("titel", "")
-    autor = medium.get("autor", "")
-    verlag = medium.get("verlag", "")
-    format_ = medium.get("format", "")
-    erscheinungsjahr = medium.get("erscheinungsjahr_schaetzung", "")
-    dicke = medium.get("ruecken_dicke_mm", "")
-    farbe = medium.get("cover_farbe", "")
-    merkmale = medium.get("cover_merkmale", "")
-    schrift = medium.get("schrift_stil", "")
-    auflage = medium.get("auflage_hinweis", "")
-    medium_typ = medium.get("medium_typ", "Buch")
-
-    query_teile = [titel]
-    if autor:
-        query_teile.append(autor)
-    if verlag:
-        query_teile.append(verlag)
-    if format_ and format_ not in ("Buch",):
-        query_teile.append(format_)
-    query = " ".join(query_teile)
-
-    prompt = f"""Du bist ein Experte fuer Medienidentifikation.
-Bestimme den exakten Produktcode (ISBN, EAN) fuer dieses Medium.
-
-Medium: {query}
-
-Visuelle Merkmale:
-- Typ: {medium_typ}, Format: {format_}, Verlag: {verlag}
-- Rueckendicke: {dicke} mm, Jahr (Schaetzung): {erscheinungsjahr}
-- Farben: {farbe}, Merkmale: {merkmale}
-- Schrift: {schrift}, Auflage: {auflage}
-
-Regeln:
-- ISBN-13: 13 Ziffern, beginnt mit 978 oder 979
-- ISBN-10: 10 Zeichen (Ziffern, letztes darf X sein)
-- EAN: 8-13 Ziffern (DVDs/CDs/Spiele beginnen nicht zwingend mit 978/979)
-- Antworte NUR mit dem Code, keine Bindestriche, kein anderer Text
-- Kein sicherer Code gefunden: antworte mit unbekannt
-
-Produktcode:"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=30,
-        )
-        result = response.choices[0].message.content.strip()
-        print(f"KI Antwort fuer '{titel}': {result[:100]}")
-
-        cleaned = result.replace("-", "").replace(" ", "")
-        cleaned = "".join(c for c in cleaned if c.isdigit() or c.upper() == "X")
-
-        if "unbekannt" in result.lower() or "unknown" in result.lower() or not cleaned:
-            print(f"KI: Kein Produktcode fuer '{titel}'")
-            return ""
-
-        is_isbn10 = (
-            len(cleaned) == 10 and
-            cleaned[:9].isdigit() and
-            (cleaned[9].isdigit() or cleaned[9].upper() == "X")
-        )
-        is_ean = cleaned.isdigit() and 8 <= len(cleaned) <= 13
-
-        if is_isbn10 or is_ean:
-            print(f"Produktcode: '{cleaned}' fuer '{titel}' ({medium_typ})")
-            return cleaned
-        else:
-            print(f"Ungueltiges Format '{cleaned}' fuer '{titel}' - ignoriert")
-            return ""
-
-    except Exception as e:
-        print(f"ISBN-Suche Fehler fuer '{titel}': {e}")
-        return ""
 
 
 async def query_bonavendi(identifier: str) -> tuple[float, str]:
@@ -288,21 +217,24 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
     medien = daten.get("medien", [])
 
-    loop = asyncio.get_event_loop()
-    identifier_tasks = [
-        loop.run_in_executor(executor, get_identifier_via_ki, m)
-        for m in medien
-    ]
-    identifiers = await asyncio.gather(*identifier_tasks)
+    bonavendi_tasks = []
+    for m in medien:
+        ident = m.get("isbn_ean", "").strip()
+        cleaned = "".join(c for c in ident if c.isdigit())
+        if cleaned and 8 <= len(cleaned) <= 13:
+            print(f"ISBN/EAN von GPT-4o fuer '{m['titel']}': {cleaned}")
+            bonavendi_tasks.append(query_bonavendi(cleaned))
+        else:
+            if ident:
+                print(f"Ungueltiges ISBN-Format von GPT fuer '{m['titel']}': '{ident}' — uebersprungen")
+            else:
+                print(f"Keine ISBN von GPT fuer '{m['titel']}'")
+            bonavendi_tasks.append(kein_ankauf())
 
-    bonavendi_tasks = [
-        query_bonavendi(ident) if ident else kein_ankauf()
-        for ident in identifiers
-    ]
     preise = await asyncio.gather(*bonavendi_tasks, return_exceptions=True)
 
     for i, medium in enumerate(medien):
-        ident = identifiers[i]
+        ident = "".join(c for c in medium.get("isbn_ean", "") if c.isdigit())
         result = preise[i]
         preis, anbieter = result if not isinstance(result, Exception) else (0.0, "Kein Ankauf")
 
@@ -313,7 +245,7 @@ async def scan_regal_root(file: UploadFile = File(...)):
 
         farbe_box = "#00FF00" if preis > 2.0 else ("#FFFF00" if preis > 0.0 else "#FF0000")
         zeile1 = f"{anbieter}: {preis:.2f}\u20ac" if preis > 0.0 else "Kein Ankauf"
-        zeile2 = f"{ident}" if ident else "Code: unbekannt"
+        zeile2 = f"{ident}" if ident else "ISBN: unbekannt"
         zeile3 = f"{medium.get('format','?')} | ca. {medium.get('erscheinungsjahr_schaetzung','?')}"
 
         box = (medium["xmin"], medium["ymin"], medium["xmax"], medium["ymax"])
