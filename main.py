@@ -60,17 +60,12 @@ def verarbeite_das_bild(image_bytes):
         }
     }
 
-    prompt = """Erkenne jedes Buch/CD/Spiel auf diesem Foto.
+    prompt = """Analysiere dieses Foto und erkenne jedes sichtbare Medium (Buch, CD, DVD, Spiel usw.).
 
-Fuer jedes Buch/CD/Spiel gib an:
-- autor: Name des Autors
--Publisher: Name des Veröffentlicher
-- titel: Name des Mediums
-- isbn_ean: Achte auf die Bestimmung der Version, bei Büchern z.B. Hardcover, Taschenbuch etc. zur korrekten ISBN Bestimmung.
-   Recherchiere den exakten Produktcode (ISBN oder EAN) im Internet ueber dieses Medium.
-   Prüfe das Ergebnis sorgfältig gegen
-   Nur Ziffern, keine Bindestriche. Wenn unbekannt: leerer String.
-- Pixelkoordinaten der einzelnen Medien auf dem Bild, von Ecke zu Ecke: xmin, ymin, xmax, ymax"""
+Fuer jedes Medium liefere:
+- titel: Exakter Titel wie auf dem Medium sichtbar
+- isbn_ean: Bestimme anhand deines Trainingswissens den exakten Produktcode (ISBN-13 oder EAN) fuer dieses spezifische Medium. Beruecksichtige dabei Titel, Autor, Format (Hardcover/Taschenbuch), Verlag und alle sichtbaren visuellen Merkmale um die genaue Ausgabe zu identifizieren. Nur Ziffern ohne Bindestriche. Wenn du dir nicht sicher bist: leerer String.
+- xmin, ymin, xmax, ymax: Pixelkoordinaten des Mediums auf dem Foto"""
 
     response = client.chat.completions.create(
         model="gpt-6-luna",
@@ -185,7 +180,7 @@ async def scan_regal_root(file: UploadFile = File(...)):
     for m in medien:
         ident = m.get("isbn_ean", "").strip()
         if ident:
-            print(f"ISBN/EAN von GPT-4o fuer '{m['titel']}': {ident}")
+            print(f"ISBN/EAN von GPT-6 Luna fuer '{m['titel']}': {ident}")
             bonavendi_tasks.append(query_bonavendi(ident))
         else:
             print(f"Keine ISBN von GPT fuer '{m['titel']}'")
