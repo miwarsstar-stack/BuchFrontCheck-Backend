@@ -30,7 +30,7 @@ def get_isbn_via_search(titel: str, autor: str) -> str:
         if not autor:
             query = f"ISBN-13 des Buches \"{titel}\""
         response = client.chat.completions.create(
-            model="gpt-4o-search-preview",
+           model="gpt-4o-mini-search-preview",
             messages=[{"role": "user", "content": 
                 f"Was ist die ISBN-13 des Buches '{titel}' von '{autor}'? "
                 f"Antworte NUR mit der 13-stelligen ISBN-Zahl, ohne Text davor oder danach. "
